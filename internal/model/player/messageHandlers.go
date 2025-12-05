@@ -8,22 +8,33 @@ import (
 
 func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 	roleChangeMsg := msg.GetRoleChange()
-	switch {
-	case roleChangeMsg.GetReceiverRole() == pb.NodeRole_DEPUTY:
-		// DEPUTY
-		p.Node.PlayerInfo.Role = pb.NodeRole_DEPUTY.Enum()
+	newRole := roleChangeMsg.GetReceiverRole()
+
+	// Обновляем роль игрока
+	p.Node.PlayerInfo.Role = newRole.Enum()
+
+	// Обновляем роль в состоянии игры, если оно доступно
+	if p.Node.State != nil && p.Node.State.Players != nil {
+		for _, player := range p.Node.State.Players.Players {
+			if player.GetId() == p.Node.PlayerInfo.GetId() {
+				player.Role = newRole.Enum()
+				break
+			}
+		}
+	}
+
+	switch newRole {
+	case pb.NodeRole_DEPUTY:
 		log.Printf("Assigned as DEPUTY")
-	case roleChangeMsg.GetReceiverRole() == pb.NodeRole_MASTER:
-		// MASTER
-		p.Node.PlayerInfo.Role = pb.NodeRole_MASTER.Enum()
+	case pb.NodeRole_MASTER:
 		log.Printf("Assigned as MASTER")
 		// TODO: Implement logic to take over as MASTER
-	case roleChangeMsg.GetReceiverRole() == pb.NodeRole_VIEWER:
-		// VIEWER
-		p.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
-		log.Printf("Assigned as VIEWER")
+	case pb.NodeRole_VIEWER:
+		log.Printf("Now in VIEWER mode - snake is ZOMBIE")
+	case pb.NodeRole_NORMAL:
+		log.Printf("Assigned as NORMAL player")
 	default:
-		log.Printf("Received unknown RoleChangeMsg")
+		log.Printf("Received unknown role: %v", newRole)
 	}
 }
 

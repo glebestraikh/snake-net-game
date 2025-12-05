@@ -5,9 +5,10 @@ import (
 	"google.golang.org/protobuf/proto"
 	"log"
 	"net"
-	"os"
 	"snake-net-game/internal/model/common"
+	"snake-net-game/internal/model/master"
 	pb "snake-net-game/pkg/proto"
+	"sync"
 	"time"
 )
 
@@ -27,9 +28,13 @@ type Player struct {
 	MasterAddr      *net.UDPAddr
 	LastStateMsg    int32
 
-	haveId bool
+	haveId   bool
+	IsViewer bool // true если игрок присоединяется как наблюдатель
 
 	DiscoveredGames []DiscoveredGame
+
+	stopChan chan struct{}  // канал для остановки горутин при переходе в MASTER
+	wg       sync.WaitGroup // для отслеживания завершения горутин Player
 }
 
 func NewPlayer(multicastConn *net.UDPConn) *Player {
@@ -71,21 +76,50 @@ func NewPlayer(multicastConn *net.UDPConn) *Player {
 		haveId: false,
 
 		DiscoveredGames: []DiscoveredGame{},
+		stopChan:        make(chan struct{}),
 	}
 }
 
 func (p *Player) Start() {
 	p.discoverGames()
-	go p.receiveMessages()
-	go p.Node.ResendUnconfirmedMessages(p.Node.Config.GetStateDelayMs())
-	go p.Node.SendPings(p.Node.Config.GetStateDelayMs())
+	p.wg.Add(2) // Для receiveMessages и checkTimeouts
+	go p.receiveMessagesLoop()
+	go p.checkTimeoutsLoop()
+	p.Node.StartResendUnconfirmedMessages(p.Node.Config.GetStateDelayMs())
+	p.Node.StartSendPings(p.Node.Config.GetStateDelayMs())
 }
 
 func (p *Player) ReceiveMulticastMessages() {
 	for {
+		// Проверяем stopChan для корректного завершения
+		select {
+		case <-p.stopChan:
+			log.Printf("Player ReceiveMulticastMessages stopped via stopChan")
+			return
+		default:
+		}
+
+		// Проверяем роль - если стали MASTER, выходим из горутины
+		// так как Master запустит свою собственную receiveMulticastMessages
+		p.Node.Mu.Lock()
+		role := p.Node.PlayerInfo.GetRole()
+		p.Node.Mu.Unlock()
+
+		if role == pb.NodeRole_MASTER {
+			log.Printf("Player became MASTER, stopping ReceiveMulticastMessages")
+			return
+		}
+
+		// Устанавливаем короткий таймаут для возможности проверки stopChan
+		_ = p.Node.MulticastConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+
 		buf := make([]byte, 4096)
 		n, addr, err := p.Node.MulticastConn.ReadFromUDP(buf)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue // Таймаут - нормальное поведение, просто проверяем stopChan снова
+			}
+			// Логируем только реальные ошибки, не таймауты
 			log.Printf("Error receiving multicast message: %v", err)
 			continue
 		}
@@ -132,11 +166,36 @@ func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.
 	log.Printf("Discovered new game: '%s'", announcement.GetGameName())
 }
 
-func (p *Player) receiveMessages() {
+func (p *Player) receiveMessagesLoop() {
+	defer p.wg.Done()
+
 	for {
+		select {
+		case <-p.stopChan:
+			log.Printf("Player receiveMessages stopped")
+			// Убираем дедлайн перед выходом
+			_ = p.Node.UnicastConn.SetReadDeadline(time.Time{})
+			return
+		default:
+		}
+
 		buf := make([]byte, 4096)
+
+		// Проверяем stopChan еще раз перед установкой дедлайна
+		select {
+		case <-p.stopChan:
+			log.Printf("Player receiveMessages stopped (before SetReadDeadline)")
+			_ = p.Node.UnicastConn.SetReadDeadline(time.Time{})
+			return
+		default:
+			_ = p.Node.UnicastConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		}
+
 		n, addr, err := p.Node.UnicastConn.ReadFromUDP(buf)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
 			log.Printf("Error receiving message: %v", err)
 			continue
 		}
@@ -168,6 +227,11 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		p.MasterAddr = addr
 		p.Node.MasterAddr = addr
 		p.AnnouncementMsg = t.Announcement
+		// Устанавливаем Config из AnnouncementMsg
+		if len(t.Announcement.Games) > 0 {
+			p.Node.Config = t.Announcement.Games[0].GetConfig()
+			log.Printf("Set Config from AnnouncementMsg: stateDelayMs=%d", p.Node.Config.GetStateDelayMs())
+		}
 		p.Node.Mu.Unlock()
 		log.Printf("Received AnnouncementMsg from %v via unicast", addr)
 		p.sendJoinRequest()
@@ -189,10 +253,9 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		errorMsg := t.Error.GetErrorMessage()
 		p.Node.Mu.Unlock()
 		p.Node.SendAck(msg, addr)
-		if errorMsg == "You have crashed and been removed from the game. Exiting..." {
-			log.Printf("Received crash notification: %s", errorMsg)
-			os.Exit(0)
-		}
+		// Просто логируем ошибку, но не закрываем программу
+		// Игрок может продолжить наблюдать за игрой
+		log.Printf("Received error message: %s", errorMsg)
 		return
 	case *pb.GameMessage_RoleChange:
 		p.handleRoleChangeMessage(msg)
@@ -235,6 +298,12 @@ func (p *Player) sendJoinRequest() {
 		return
 	}
 
+	// Определяем роль на основе IsViewer
+	requestedRole := pb.NodeRole_NORMAL
+	if p.IsViewer {
+		requestedRole = pb.NodeRole_VIEWER
+	}
+
 	joinMsg := &pb.GameMessage{
 		MsgSeq: proto.Int64(p.Node.MsgSeq),
 		Type: &pb.GameMessage_Join{
@@ -242,72 +311,442 @@ func (p *Player) sendJoinRequest() {
 				PlayerType:    pb.PlayerType_HUMAN.Enum(),
 				PlayerName:    p.Node.PlayerInfo.Name,
 				GameName:      proto.String(p.AnnouncementMsg.Games[0].GetGameName()),
-				RequestedRole: pb.NodeRole_NORMAL.Enum(),
+				RequestedRole: requestedRole.Enum(),
 			},
 		},
 	}
 
 	p.Node.SendMessage(joinMsg, p.MasterAddr)
-	log.Printf("Player: Sent JoinMsg to master at %v", p.MasterAddr)
+	log.Printf("Player: Sent JoinMsg to master at %v (role: %v)", p.MasterAddr, requestedRole)
 }
 
 // обработка отвалившихся узлов
-//func (p *Player) checkTimeouts() {
-//	ticker := time.NewTicker(time.Duration(0.8*float64(p.node.Config.GetStateDelayMs())) * time.Millisecond)
-//	defer ticker.Stop()
-//
-//	for range ticker.C {
-//		now := time.Now()
-//		p.node.Mu.Lock()
-//		for _, lastInteraction := range p.node.LastInteraction {
-//			// TODO: добавить проверку на то что мастер отвалился
-//			if now.Sub(lastInteraction) > time.Duration(0.8*float64(p.node.Config.GetStateDelayMs()))*time.Millisecond {
-//				switch p.node.PlayerInfo.GetRole() {
-//				// игрок заметил, что мастер отвалился и переходит к Deputy
-//				case pb.NodeRole_NORMAL:
-//					deputy := p.getDeputy()
-//					if deputy != nil {
-//						addrStr := fmt.Sprintf("%s:%d", deputy.GetIpAddress(), deputy.GetPort())
-//						addr, err := net.ResolveUDPAddr("udp", addrStr)
-//						if err != nil {
-//							log.Printf("Error resolving deputy address: %v", err)
-//							p.node.Mu.Unlock()
-//							continue
-//						}
-//						p.MasterAddr = addr
-//						log.Printf("Switched to DEPUTY as new MASTER at %v", p.MasterAddr)
-//					} else {
-//						log.Printf("No DEPUTY available to switch to")
-//					}
-//
-//				// Deputy заметил, что отвалился мастер и заменяет его
-//				case pb.NodeRole_DEPUTY:
-//					p.becomeMaster()
-//				}
-//			}
-//		}
-//		p.node.Mu.Unlock()
-//	}
-//}
-//
-//func (p *Player) getDeputy() *pb.GamePlayer {
-//	for _, player := range p.node.State.Players.Players {
-//		if player.GetRole() == pb.NodeRole_DEPUTY {
-//			return player
-//		}
-//	}
-//	return nil
-//}
-//
-//func (p *Player) becomeMaster() {
-//	log.Printf("DEPUTY becoming new MASTER")
-//	// Обновляем роль игрока
-//	p.node.PlayerInfo.Role = pb.NodeRole_MASTER.Enum()
-//
-//	// Создаем новый мастер
-//	masterNode := master.NewDeputyMaster(p.node, p.node.PlayerInfo, p.LastStateMsg)
-//	// Запускаем мастер
-//	go masterNode.Start()
-//	// Останавливаем функции игрока
-//	p.stopPlayerFunctions()
-//}
+func (p *Player) checkTimeoutsLoop() {
+	// НЕ используем defer p.wg.Done() здесь, потому что при вызове becomeMaster()
+	// мы вызываем wg.Done() вручную ДО becomeMaster(), чтобы избежать deadlock
+
+	ticker := time.NewTicker(time.Duration(0.8*float64(p.Node.Config.GetStateDelayMs())) * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopChan:
+			log.Printf("Player checkTimeouts stopped")
+			p.wg.Done() // Вызываем вручную при нормальном завершении
+			return
+		case <-ticker.C:
+		}
+
+		now := time.Now()
+		p.Node.Mu.Lock()
+
+		if p.MasterAddr == nil {
+			p.Node.Mu.Unlock()
+			continue
+		}
+
+		// Проверяем таймаут MASTER
+		masterId := p.getMasterPlayerId()
+		lastInteraction, exists := p.Node.LastInteraction[masterId]
+
+		// Таймаут происходит если:
+		// 1. LastInteraction существует и прошло больше 0.8 * stateDelayMs
+		// 2. LastInteraction не существует (мастер никогда не отвечал) - но только если мы уже в игре
+		timeoutThreshold := time.Duration(0.8*float64(p.Node.Config.GetStateDelayMs())) * time.Millisecond
+		isTimeout := false
+
+		if exists {
+			elapsed := now.Sub(lastInteraction)
+			isTimeout = elapsed > timeoutThreshold
+			if isTimeout {
+				log.Printf("Timeout detected: elapsed=%v, threshold=%v, masterId=%d", elapsed, timeoutThreshold, masterId)
+			}
+		} else if p.haveId && masterId != 0 {
+			// Если мы уже в игре (имеем ID) и знаем мастера, но никогда не получали от него сообщений
+			// Это тоже таймаут
+			isTimeout = true
+			log.Printf("No LastInteraction record for master ID %d, haveId=%v", masterId, p.haveId)
+		} else {
+			// Отладка: почему не таймаут
+			log.Printf("No timeout: exists=%v, haveId=%v, masterId=%d, role=%v", exists, p.haveId, masterId, p.Node.PlayerInfo.GetRole())
+		}
+
+		if isTimeout {
+			log.Printf("MASTER timeout detected!")
+
+			switch p.Node.PlayerInfo.GetRole() {
+			// Обычный игрок заметил, что мастер отвалился и переключается к Deputy
+			case pb.NodeRole_NORMAL:
+				deputy := p.getDeputy()
+				if deputy != nil {
+					addrStr := fmt.Sprintf("%s:%d", deputy.GetIpAddress(), deputy.GetPort())
+					addr, err := net.ResolveUDPAddr("udp", addrStr)
+					if err != nil {
+						log.Printf("Error resolving deputy address: %v", err)
+						p.Node.Mu.Unlock()
+						continue
+					}
+
+					oldMasterId := p.getMasterPlayerId()
+					deputyId := deputy.GetId()
+
+					// Обновляем адрес мастера
+					oldMaster := p.MasterAddr
+					p.MasterAddr = addr
+					p.Node.MasterAddr = addr
+
+					// Обновляем роли в локальном состоянии
+					// Удаляем старого мастера из списка игроков
+					var updatedPlayers []*pb.GamePlayer
+					for _, player := range p.Node.State.Players.Players {
+						if player.GetId() == oldMasterId {
+							log.Printf("Removing old MASTER (player ID: %d) from local state", oldMasterId)
+							continue
+						}
+						// DEPUTY становится новым MASTER
+						if player.GetId() == deputyId {
+							player.Role = pb.NodeRole_MASTER.Enum()
+							log.Printf("Updated DEPUTY (player ID: %d) to MASTER in local state", deputyId)
+						}
+						updatedPlayers = append(updatedPlayers, player)
+					}
+					p.Node.State.Players.Players = updatedPlayers
+
+					// Удаляем змейку старого мастера
+					var updatedSnakes []*pb.GameState_Snake
+					for _, snake := range p.Node.State.Snakes {
+						if snake.GetPlayerId() != oldMasterId {
+							updatedSnakes = append(updatedSnakes, snake)
+						}
+					}
+					p.Node.State.Snakes = updatedSnakes
+
+					// Обновляем LastInteraction - удаляем старого мастера, инициализируем нового
+					delete(p.Node.LastInteraction, oldMasterId)
+					p.Node.LastInteraction[deputyId] = time.Now()
+
+					p.Node.Mu.Unlock()
+
+					// Переадресуем неподтвержденные сообщения новому MASTER
+					p.redirectUnconfirmedMessages(oldMaster, addr)
+
+					log.Printf("Switched to DEPUTY (ID: %d) as new MASTER at %v", deputyId, p.MasterAddr)
+				} else {
+					log.Printf("No DEPUTY available to switch to")
+					p.Node.Mu.Unlock()
+				}
+				continue
+
+			// Deputy заметил, что отвалился мастер и заменяет его
+			case pb.NodeRole_DEPUTY:
+				p.Node.Mu.Unlock()
+				// Декрементируем WaitGroup ДО вызова becomeMaster, чтобы избежать deadlock
+				// (becomeMaster будет ждать завершения всех горутин, включая эту)
+				p.wg.Done()
+				p.becomeMaster()
+				return // Выходим из цикла, так как стали MASTER (но defer wg.Done() уже не вызовется)
+			}
+		}
+		p.Node.Mu.Unlock()
+	}
+}
+
+func (p *Player) getMasterPlayerId() int32 {
+	if p.Node.State == nil || p.Node.State.Players == nil {
+		return 0
+	}
+	for _, player := range p.Node.State.Players.Players {
+		if player.GetRole() == pb.NodeRole_MASTER {
+			return player.GetId()
+		}
+	}
+	return 0
+}
+
+func (p *Player) getDeputy() *pb.GamePlayer {
+	if p.Node.State == nil || p.Node.State.Players == nil {
+		return nil
+	}
+	for _, player := range p.Node.State.Players.Players {
+		if player.GetRole() == pb.NodeRole_DEPUTY {
+			return player
+		}
+	}
+	return nil
+}
+
+func (p *Player) redirectUnconfirmedMessages(oldAddr, newAddr *net.UDPAddr) {
+	p.Node.Mu.Lock()
+	defer p.Node.Mu.Unlock()
+
+	// Используем публичный метод Node для переадресации
+	p.Node.RedirectUnconfirmedMessages(oldAddr, newAddr)
+}
+
+func (p *Player) becomeMaster() {
+	log.Printf("DEPUTY becoming new MASTER")
+
+	// СНАЧАЛА отправляем сигнал остановки
+	close(p.stopChan)
+	log.Printf("Sent stop signal to all Player goroutines")
+
+	// ПОТОМ устанавливаем короткий дедлайн, чтобы ReadFromUDP быстро вернулся с timeout
+	// и горутина могла проверить stopChan и завершиться
+	_ = p.Node.UnicastConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	_ = p.Node.MulticastConn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	log.Printf("Set short deadlines to unblock Read operations")
+
+	// Останавливаем горутины Node (ResendUnconfirmedMessages и SendPings)
+	p.Node.StopNodeGoroutines()
+	log.Printf("Sent stop signal to all Node goroutines")
+
+	// Ждем завершения всех горутин Player с таймаутом
+	log.Printf("Waiting for Player goroutines to finish...")
+	playerDone := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(playerDone)
+	}()
+
+	select {
+	case <-playerDone:
+		log.Printf("All Player goroutines finished successfully")
+	case <-time.After(2 * time.Second):
+		log.Printf("WARNING: Timeout waiting for Player goroutines to finish, proceeding anyway")
+	}
+
+	// Ждем завершения всех горутин Node с таймаутом
+	log.Printf("Waiting for Node goroutines to finish...")
+	nodeDone := make(chan struct{})
+	go func() {
+		p.Node.WaitForGoroutines()
+		close(nodeDone)
+	}()
+
+	select {
+	case <-nodeDone:
+		log.Printf("All Node goroutines finished successfully")
+	case <-time.After(2 * time.Second):
+		log.Printf("WARNING: Timeout waiting for Node goroutines to finish, proceeding anyway")
+	}
+
+	// Очищаем очередь неподтвержденных сообщений
+	p.Node.Mu.Lock()
+	log.Printf("Clearing %d unconfirmed messages", p.Node.UnconfirmedMessages())
+	p.Node.ClearUnconfirmedMessages()
+
+	// Очищаем AckChan от всех оставшихся сообщений
+	for len(p.Node.AckChan) > 0 {
+		<-p.Node.AckChan
+	}
+	p.Node.Mu.Unlock()
+
+	log.Printf("All old goroutines stopped and cleaned up")
+
+	// Обновляем роль игрока
+	p.Node.Mu.Lock()
+	p.Node.PlayerInfo.Role = pb.NodeRole_MASTER.Enum()
+	p.Node.Role = pb.NodeRole_MASTER // Также обновляем Node.Role!
+
+	// Удаляем старого мастера из списка игроков и змеек
+	var updatedPlayers []*pb.GamePlayer
+	var updatedSnakes []*pb.GameState_Snake
+	oldMasterId := int32(-1)
+
+	for _, player := range p.Node.State.Players.Players {
+		if player.GetRole() == pb.NodeRole_MASTER && player.GetId() != p.Node.PlayerInfo.GetId() {
+			oldMasterId = player.GetId()
+			log.Printf("Removing old MASTER (player ID: %d) from game state", oldMasterId)
+			continue
+		}
+		if player.GetId() == p.Node.PlayerInfo.GetId() {
+			player.Role = pb.NodeRole_MASTER.Enum()
+		}
+		updatedPlayers = append(updatedPlayers, player)
+	}
+
+	// Удаляем змейку старого мастера и убеждаемся что наша змейка ALIVE
+	for _, snake := range p.Node.State.Snakes {
+		if snake.GetPlayerId() == oldMasterId {
+			continue // Пропускаем змейку старого мастера
+		}
+		// Убеждаемся что наша змейка остаётся ALIVE
+		if snake.GetPlayerId() == p.Node.PlayerInfo.GetId() {
+			snake.State = pb.GameState_Snake_ALIVE.Enum()
+			log.Printf("Ensured our snake (player ID: %d) is ALIVE", p.Node.PlayerInfo.GetId())
+		}
+		updatedSnakes = append(updatedSnakes, snake)
+	}
+
+	p.Node.State.Players.Players = updatedPlayers
+	p.Node.State.Snakes = updatedSnakes
+
+	// Логируем текущее состояние для отладки
+	log.Printf("After cleanup: %d players, %d snakes", len(updatedPlayers), len(updatedSnakes))
+	for _, snake := range updatedSnakes {
+		log.Printf("Snake for player %d: state=%v", snake.GetPlayerId(), snake.GetState())
+	}
+
+	// Очищаем LastInteraction от старого мастера
+	if oldMasterId != -1 {
+		delete(p.Node.LastInteraction, oldMasterId)
+		log.Printf("Removed old MASTER (ID: %d) from LastInteraction", oldMasterId)
+	}
+
+	// Полностью очищаем LastInteraction - начинаем с чистого листа как Master
+	p.Node.LastInteraction = make(map[int32]time.Time)
+	log.Printf("Cleared LastInteraction map")
+
+	// Очищаем LastSent - больше не нужно отправлять сообщения старому мастеру
+	p.Node.LastSent = make(map[string]time.Time)
+	log.Printf("Cleared LastSent map")
+
+	// Очищаем MasterAddr - мы теперь сами мастер
+	p.Node.MasterAddr = nil
+	p.MasterAddr = nil
+	log.Printf("Cleared MasterAddr")
+
+	// Создаем новый канал остановки и AckChan для Master
+	p.Node.ResetStopChan()
+	p.Node.AckChan = make(chan int64, 100)
+
+	// Создаем структуру Master из текущего Player
+	newMaster := master.NewMasterFromPlayer(p.Node, p.Node.State.Players, p.LastStateMsg)
+	p.Node.Mu.Unlock()
+
+	log.Printf("Player %d is now MASTER, starting master functions", p.Node.PlayerInfo.GetId())
+
+	// Отправляем RoleChangeMsg всем игрокам о смене MASTER
+	p.notifyPlayersAboutNewMaster()
+
+	// Запускаем все функции мастера
+	newMaster.Start()
+
+	log.Printf("Master started successfully")
+}
+
+// notifyPlayersAboutNewMaster уведомляет всех игроков о смене MASTER
+func (p *Player) notifyPlayersAboutNewMaster() {
+	p.Node.Mu.Lock()
+	if p.Node.State == nil || p.Node.State.Players == nil {
+		p.Node.Mu.Unlock()
+		return
+	}
+
+	// Собираем адреса всех игроков кроме себя и старого мастера
+	var playerAddrs []struct {
+		addr     *net.UDPAddr
+		playerId int32
+	}
+
+	for _, player := range p.Node.State.Players.Players {
+		// Пропускаем себя
+		if player.GetId() == p.Node.PlayerInfo.GetId() {
+			continue
+		}
+		// Пропускаем старого мастера (у него была роль MASTER до смены)
+		if player.GetRole() == pb.NodeRole_MASTER {
+			log.Printf("Skipping old MASTER (player ID: %d) in notifications", player.GetId())
+			continue
+		}
+
+		addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
+		addr, err := net.ResolveUDPAddr("udp", addrStr)
+		if err != nil {
+			log.Printf("Error resolving address for player %d: %v", player.GetId(), err)
+			continue
+		}
+		playerAddrs = append(playerAddrs, struct {
+			addr     *net.UDPAddr
+			playerId int32
+		}{addr, player.GetId()})
+	}
+	p.Node.Mu.Unlock()
+
+	// Отправляем RoleChangeMsg каждому игроку
+	// НЕ меняем их роль, просто уведомляем о новом мастере
+	for _, info := range playerAddrs {
+		roleChangeMsg := &pb.GameMessage{
+			MsgSeq:     proto.Int64(p.Node.MsgSeq),
+			SenderId:   proto.Int32(p.Node.PlayerInfo.GetId()),
+			ReceiverId: proto.Int32(info.playerId),
+			Type: &pb.GameMessage_RoleChange{
+				RoleChange: &pb.GameMessage_RoleChangeMsg{
+					SenderRole:   pb.NodeRole_MASTER.Enum(),
+					ReceiverRole: pb.NodeRole_NORMAL.Enum(), // Оставляем их NORMAL (или DEPUTY, если это был DEPUTY)
+				},
+			},
+		}
+		p.Node.SendMessage(roleChangeMsg, info.addr)
+		log.Printf("Notified player ID %d at %v about new MASTER", info.playerId, info.addr)
+	}
+
+	// Выбираем нового DEPUTY
+	p.selectNewDeputy()
+}
+
+// selectNewDeputy выбирает нового DEPUTY среди NORMAL игроков
+func (p *Player) selectNewDeputy() {
+	p.Node.Mu.Lock()
+	var deputyCandidate *pb.GamePlayer
+
+	// Ищем живую змейку среди NORMAL игроков
+	for _, player := range p.Node.State.Players.Players {
+		// Пропускаем себя
+		if player.GetId() == p.Node.PlayerInfo.GetId() {
+			continue
+		}
+		// Проверяем что это NORMAL игрок
+		if player.GetRole() != pb.NodeRole_NORMAL {
+			continue
+		}
+
+		// Проверяем что у игрока есть живая змейка
+		hasAliveSnake := false
+		for _, snake := range p.Node.State.Snakes {
+			if snake.GetPlayerId() == player.GetId() && snake.GetState() == pb.GameState_Snake_ALIVE {
+				hasAliveSnake = true
+				break
+			}
+		}
+
+		if hasAliveSnake {
+			deputyCandidate = player
+			break
+		}
+	}
+
+	if deputyCandidate == nil {
+		p.Node.Mu.Unlock()
+		log.Printf("No NORMAL players with alive snakes available to become DEPUTY")
+		return
+	}
+
+	// Обновляем роль в состоянии
+	deputyCandidate.Role = pb.NodeRole_DEPUTY.Enum()
+
+	addrStr := fmt.Sprintf("%s:%d", deputyCandidate.GetIpAddress(), deputyCandidate.GetPort())
+	deputyId := deputyCandidate.GetId()
+	p.Node.Mu.Unlock()
+
+	addr, err := net.ResolveUDPAddr("udp", addrStr)
+	if err != nil {
+		log.Printf("Error resolving address for new DEPUTY: %v", err)
+		return
+	}
+
+	// Отправляем RoleChangeMsg новому DEPUTY
+	roleChangeMsg := &pb.GameMessage{
+		MsgSeq:     proto.Int64(p.Node.MsgSeq),
+		SenderId:   proto.Int32(p.Node.PlayerInfo.GetId()),
+		ReceiverId: proto.Int32(deputyId),
+		Type: &pb.GameMessage_RoleChange{
+			RoleChange: &pb.GameMessage_RoleChangeMsg{
+				SenderRole:   pb.NodeRole_MASTER.Enum(),
+				ReceiverRole: pb.NodeRole_DEPUTY.Enum(),
+			},
+		},
+	}
+	p.Node.SendMessage(roleChangeMsg, addr)
+	log.Printf("Assigned player %d as new DEPUTY", deputyId)
+}

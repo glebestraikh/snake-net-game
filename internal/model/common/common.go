@@ -8,6 +8,7 @@ import (
 	pb "snake-net-game/pkg/proto"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,6 +43,9 @@ type Node struct {
 	Mu                  sync.Mutex
 	Cond                *sync.Cond
 	AckChan             chan int64
+	stopChan            chan struct{}  // канал для остановки горутин Node
+	wg                  sync.WaitGroup // для отслеживания завершения горутин
+	stopped             atomic.Bool    // атомарный флаг остановки
 }
 
 func NewNode(state *pb.GameState, config *pb.GameConfig, multicastConn *net.UDPConn,
@@ -59,11 +63,30 @@ func NewNode(state *pb.GameState, config *pb.GameConfig, multicastConn *net.UDPC
 		LastSent:            make(map[string]time.Time),
 		unconfirmedMessages: make(map[int64]*MessageEntry),
 		AckChan:             make(chan int64, 100), // Буферизованный канал для предотвращения блокировок
+		stopChan:            make(chan struct{}),
 	}
 
 	node.Cond = sync.NewCond(&node.Mu)
 
 	return node
+}
+
+// StopNodeGoroutines останавливает горутины Node (для перехода из Player в Master)
+func (n *Node) StopNodeGoroutines() {
+	n.stopped.Store(true) // Устанавливаем атомарный флаг ПЕРЕД закрытием канала
+	close(n.stopChan)
+}
+
+// WaitForGoroutines ожидает завершения всех горутин Node
+func (n *Node) WaitForGoroutines() {
+	n.wg.Wait()
+	log.Printf("All Node goroutines finished")
+}
+
+// ResetStopChan создает новый канал остановки (для использования после смены роли)
+func (n *Node) ResetStopChan() {
+	n.stopped.Store(false) // Сбрасываем атомарный флаг
+	n.stopChan = make(chan struct{})
 }
 
 // GetLocalIP получения реального ip
@@ -153,6 +176,12 @@ func (n *Node) SendPing(addr *net.UDPAddr) {
 
 // SendMessage отправка сообщения и добавление его в неподтверждённые
 func (n *Node) SendMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
+	// Проверяем что адрес не nil
+	if addr == nil {
+		log.Printf("Warning: SendMessage called with nil address, skipping")
+		return
+	}
+
 	// увеличиваем порядковый номер сообщения
 	msg.SenderId = proto.Int32(n.PlayerInfo.GetId())
 	switch msg.Type.(type) {
@@ -205,18 +234,73 @@ func (n *Node) HandleAck(seq int64) {
 	}
 }
 
-// ResendUnconfirmedMessages проверка и переотправка неподтвержденных сообщений
-func (n *Node) ResendUnconfirmedMessages(stateDelayMs int32) {
+// ClearUnconfirmedMessages очищает очередь неподтвержденных сообщений
+func (n *Node) ClearUnconfirmedMessages() {
+	n.unconfirmedMessages = make(map[int64]*MessageEntry)
+	log.Printf("Cleared all unconfirmed messages")
+}
+
+// UnconfirmedMessages возвращает количество неподтвержденных сообщений
+func (n *Node) UnconfirmedMessages() int {
+	return len(n.unconfirmedMessages)
+}
+
+// RedirectUnconfirmedMessages переадресует неподтвержденные сообщения с одного адреса на другой
+func (n *Node) RedirectUnconfirmedMessages(oldAddr, newAddr *net.UDPAddr) {
+	for _, entry := range n.unconfirmedMessages {
+		if entry.addr.IP.Equal(oldAddr.IP) && entry.addr.Port == oldAddr.Port {
+			entry.addr = newAddr
+			log.Printf("Redirected unconfirmed message to new MASTER")
+		}
+	}
+}
+
+// isStopped проверяет, остановлен ли Node
+func (n *Node) isStopped() bool {
+	return n.stopped.Load()
+}
+
+// StartResendUnconfirmedMessages запускает горутину переотправки с правильной регистрацией в WaitGroup
+func (n *Node) StartResendUnconfirmedMessages(stateDelayMs int32) {
+	n.wg.Add(1)
+	go n.resendUnconfirmedMessagesLoop(stateDelayMs)
+}
+
+// resendUnconfirmedMessagesLoop проверка и переотправка неподтвержденных сообщений
+func (n *Node) resendUnconfirmedMessagesLoop(stateDelayMs int32) {
+	defer n.wg.Done()
+	defer log.Printf("Node ResendUnconfirmedMessages goroutine exited")
+
 	ticker := time.NewTicker(time.Duration(stateDelayMs/10) * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
+		// Проверяем остановку в начале каждой итерации
+		if n.isStopped() {
+			log.Printf("Node ResendUnconfirmedMessages stopped (isStopped check)")
+			return
+		}
+
 		select {
-		// ответ не пришел, заново отправляем сообщение
+		case <-n.stopChan:
+			log.Printf("Node ResendUnconfirmedMessages stopped")
+			return
 		case <-ticker.C:
-			now := time.Now()
+			// Проверяем остановку после тикера
+			if n.isStopped() {
+				log.Printf("Node ResendUnconfirmedMessages stopped (after ticker)")
+				return
+			}
+
 			n.Mu.Lock()
-			// Копируем map для итерации, чтобы избежать блокировки на долгое время
+			// Проверяем, есть ли вообще сообщения для переотправки
+			if len(n.unconfirmedMessages) == 0 {
+				n.Mu.Unlock()
+				continue
+			}
+
+			now := time.Now()
+			// Копируем map для итерации
 			messagesToResend := make(map[int64]*MessageEntry)
 			for seq, entry := range n.unconfirmedMessages {
 				if now.Sub(entry.timestamp) > time.Duration(n.Config.GetStateDelayMs()/10)*time.Millisecond {
@@ -225,8 +309,14 @@ func (n *Node) ResendUnconfirmedMessages(stateDelayMs int32) {
 			}
 			n.Mu.Unlock()
 
-			// Переотправляем сообщения без удержания мьютекса
+			// Переотправляем сообщения
 			for seq, entry := range messagesToResend {
+				// Проверяем остановку перед каждой отправкой
+				if n.isStopped() {
+					log.Printf("Node ResendUnconfirmedMessages stopped (during resend)")
+					return
+				}
+
 				data, err := proto.Marshal(entry.msg)
 				if err != nil {
 					log.Printf("Error marshalling Message: %v", err)
@@ -238,7 +328,7 @@ func (n *Node) ResendUnconfirmedMessages(stateDelayMs int32) {
 					continue
 				}
 
-				// Обновляем timestamp под мьютексом
+				// Обновляем timestamp
 				n.Mu.Lock()
 				if existingEntry, exists := n.unconfirmedMessages[seq]; exists {
 					existingEntry.timestamp = time.Now()
@@ -248,8 +338,11 @@ func (n *Node) ResendUnconfirmedMessages(stateDelayMs int32) {
 				log.Printf("Resent message with Seq: %d to %v from %v", seq, entry.addr, n.PlayerInfo.GetIpAddress()+":"+strconv.Itoa(int(n.PlayerInfo.GetPort())))
 				log.Printf(entry.msg.String())
 			}
-		// ответ пришел, удаляем из мапы
-		case seq := <-n.AckChan:
+		case seq, ok := <-n.AckChan:
+			if !ok {
+				log.Printf("Node ResendUnconfirmedMessages stopped (AckChan closed)")
+				return
+			}
 			n.Mu.Lock()
 			n.HandleAck(seq)
 			n.Mu.Unlock()
@@ -257,12 +350,40 @@ func (n *Node) ResendUnconfirmedMessages(stateDelayMs int32) {
 	}
 }
 
-// SendPings отправка PingMsg, если не было отправлено сообщений в течение stateDelayMs/10
-func (n *Node) SendPings(stateDelayMs int32) {
+// StartSendPings запускает горутину отправки ping с правильной регистрацией в WaitGroup
+func (n *Node) StartSendPings(stateDelayMs int32) {
+	n.wg.Add(1)
+	go n.sendPingsLoop(stateDelayMs)
+}
+
+// sendPingsLoop отправка PingMsg, если не было отправлено сообщений в течение stateDelayMs/10
+func (n *Node) sendPingsLoop(stateDelayMs int32) {
+	defer n.wg.Done()
+	defer log.Printf("Node SendPings goroutine exited")
+
 	ticker := time.NewTicker(time.Duration(stateDelayMs/10) * time.Millisecond)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		// Проверяем остановку в начале каждой итерации
+		if n.isStopped() {
+			log.Printf("Node SendPings stopped (isStopped check)")
+			return
+		}
+
+		select {
+		case <-n.stopChan:
+			log.Printf("Node SendPings stopped")
+			return
+		case <-ticker.C:
+		}
+
+		// Проверяем остановку после тикера
+		if n.isStopped() {
+			log.Printf("Node SendPings stopped (after ticker)")
+			return
+		}
+
 		now := time.Now()
 		n.Mu.Lock()
 		if n.State == nil {
@@ -272,6 +393,13 @@ func (n *Node) SendPings(stateDelayMs int32) {
 		if n.Role == pb.NodeRole_MASTER {
 			// Мастер пингует всех игроков, кроме себя
 			for _, player := range n.State.Players.Players {
+				// Проверяем остановку перед отправкой каждого ping
+				if n.isStopped() {
+					n.Mu.Unlock()
+					log.Printf("Node SendPings stopped (during master ping loop)")
+					return
+				}
+
 				if player.GetId() == n.PlayerInfo.GetId() {
 					continue
 				}

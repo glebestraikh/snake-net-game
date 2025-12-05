@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"google.golang.org/protobuf/proto"
 	"log"
+	"math/rand"
 	"net"
 	pb "snake-net-game/pkg/proto"
 	"time"
@@ -22,23 +23,46 @@ func (m *Master) handleErrorMsg(addr *net.UDPAddr) {
 
 func (m *Master) handleJoinMessage(msgSeq int64, joinMsg *pb.GameMessage_JoinMsg, addr *net.UDPAddr, coord *pb.GameState_Coord) {
 	m.Node.Mu.Lock()
-	newPlayerID := int32(len(m.players.Players) + 1)
+
+	// Находим максимальный существующий ID и прибавляем 1
+	maxID := int32(0)
+	for _, player := range m.players.Players {
+		if player.GetId() > maxID {
+			maxID = player.GetId()
+		}
+	}
+	newPlayerID := maxID + 1
+
+	// Определяем роль игрока
+	requestedRole := joinMsg.GetRequestedRole()
+	// VIEWER не может быть MASTER или DEPUTY
+	if requestedRole == pb.NodeRole_MASTER || requestedRole == pb.NodeRole_DEPUTY {
+		requestedRole = pb.NodeRole_NORMAL
+	}
+
 	newPlayer := &pb.GamePlayer{
 		Name:      proto.String(joinMsg.GetPlayerName()),
 		Id:        proto.Int32(newPlayerID),
 		IpAddress: proto.String(addr.IP.String()),
 		Port:      proto.Int32(int32(addr.Port)),
-		Role:      joinMsg.GetRequestedRole().Enum(),
+		Role:      requestedRole.Enum(),
 		Type:      joinMsg.GetPlayerType().Enum(),
 		Score:     proto.Int32(0),
 	}
 	m.players.Players = append(m.players.Players, newPlayer)
 	m.Node.State.Players = m.players
-	m.addSnakeForNewPlayer(newPlayerID, coord)
+
+	// Создаем змейку только если игрок НЕ VIEWER
+	if requestedRole != pb.NodeRole_VIEWER {
+		m.addSnakeForNewPlayer(newPlayerID, coord)
+	}
 	m.Node.Mu.Unlock()
 
 	// Вызываем checkAndAssignDeputy БЕЗ удержания мьютекса, так как внутри вызывается SendMessage
-	m.checkAndAssignDeputy()
+	// Назначаем Deputy только если новый игрок НЕ VIEWER
+	if requestedRole != pb.NodeRole_VIEWER {
+		m.checkAndAssignDeputy()
+	}
 
 	ackMsg := &pb.GameMessage{
 		MsgSeq:     proto.Int64(msgSeq),
@@ -106,19 +130,104 @@ func (m *Master) hasDeputy() bool {
 }
 
 func (m *Master) addSnakeForNewPlayer(playerID int32, coord *pb.GameState_Coord) {
+	// Центр квадрата 5x5 с учетом тора
+	centerX := (coord.GetX() + 2) % m.Node.Config.GetWidth()
+	centerY := (coord.GetY() + 2) % m.Node.Config.GetHeight()
+
+	// Пробуем все 4 направления для хвоста
+	directions := []pb.Direction{pb.Direction_UP, pb.Direction_DOWN, pb.Direction_LEFT, pb.Direction_RIGHT}
+
+	// Перемешиваем направления для случайности
+	rand.Shuffle(len(directions), func(i, j int) {
+		directions[i], directions[j] = directions[j], directions[i]
+	})
+
+	var tailX, tailY int32
+	var headDirection pb.Direction
+	var found bool
+
+	// Пробуем каждое направление, пока не найдем свободное от еды
+	for _, tailDirection := range directions {
+		tailX = centerX
+		tailY = centerY
+
+		switch tailDirection {
+		case pb.Direction_UP:
+			tailY = (centerY - 1 + m.Node.Config.GetHeight()) % m.Node.Config.GetHeight()
+			headDirection = pb.Direction_DOWN // Противоположное направление
+		case pb.Direction_DOWN:
+			tailY = (centerY + 1) % m.Node.Config.GetHeight()
+			headDirection = pb.Direction_UP
+		case pb.Direction_LEFT:
+			tailX = (centerX - 1 + m.Node.Config.GetWidth()) % m.Node.Config.GetWidth()
+			headDirection = pb.Direction_RIGHT
+		case pb.Direction_RIGHT:
+			tailX = (centerX + 1) % m.Node.Config.GetWidth()
+			headDirection = pb.Direction_LEFT
+		}
+
+		// Проверяем, нет ли еды на клетках головы и хвоста
+		headHasFood := false
+		tailHasFood := false
+
+		for _, food := range m.Node.State.Foods {
+			if food.GetX() == centerX && food.GetY() == centerY {
+				headHasFood = true
+			}
+			if food.GetX() == tailX && food.GetY() == tailY {
+				tailHasFood = true
+			}
+		}
+
+		if !headHasFood && !tailHasFood {
+			found = true
+			break
+		}
+	}
+
+	// Если не нашли место без еды, используем первое направление (еда потом удалится)
+	if !found {
+		log.Printf("Warning: Could not find position without food for player %d", playerID)
+		tailDirection := directions[0]
+		tailX = centerX
+		tailY = centerY
+
+		switch tailDirection {
+		case pb.Direction_UP:
+			tailY = (centerY - 1 + m.Node.Config.GetHeight()) % m.Node.Config.GetHeight()
+			headDirection = pb.Direction_DOWN
+		case pb.Direction_DOWN:
+			tailY = (centerY + 1) % m.Node.Config.GetHeight()
+			headDirection = pb.Direction_UP
+		case pb.Direction_LEFT:
+			tailX = (centerX - 1 + m.Node.Config.GetWidth()) % m.Node.Config.GetWidth()
+			headDirection = pb.Direction_RIGHT
+		case pb.Direction_RIGHT:
+			tailX = (centerX + 1) % m.Node.Config.GetWidth()
+			headDirection = pb.Direction_LEFT
+		}
+	}
+
+	// Создаем змейку длиной 2 клетки: голова в центре, хвост в соседней клетке
 	newSnake := &pb.GameState_Snake{
 		PlayerId: proto.Int32(playerID),
 		Points: []*pb.GameState_Coord{
 			{
-				X: proto.Int32(coord.GetX()),
-				Y: proto.Int32(coord.GetY()),
+				X: proto.Int32(centerX),
+				Y: proto.Int32(centerY),
+			},
+			{
+				X: proto.Int32(tailX),
+				Y: proto.Int32(tailY),
 			},
 		},
 		State:         pb.GameState_Snake_ALIVE.Enum(),
-		HeadDirection: pb.Direction_RIGHT.Enum(),
+		HeadDirection: headDirection.Enum(),
 	}
 
 	m.Node.State.Snakes = append(m.Node.State.Snakes, newSnake)
+	log.Printf("Created snake for player %d: head at (%d,%d), tail at (%d,%d), direction: %v",
+		playerID, centerX, centerY, tailX, tailY, headDirection)
 }
 
 func (m *Master) handleDiscoverMessage(addr *net.UDPAddr) {
@@ -149,6 +258,12 @@ func (m *Master) handleSteerMessage(steerMsg *pb.GameMessage_SteerMsg, playerId 
 
 	if snake == nil {
 		log.Printf("No snake found for player ID: %d", playerId)
+		return
+	}
+
+	// ZOMBIE-змейки не могут менять направление
+	if snake.GetState() == pb.GameState_Snake_ZOMBIE {
+		log.Printf("Cannot steer ZOMBIE snake for player ID: %d", playerId)
 		return
 	}
 
@@ -207,12 +322,14 @@ func (m *Master) checkTimeouts() {
 
 func (m *Master) removePlayer(playerId int32) {
 	m.Node.Mu.Lock()
-	m.removePlayerUnsafe(playerId)
+	// ВАЖНО: проверяем роль ДО удаления игрока из списка
 	wasDeputy := m.wasPlayerDeputy(playerId)
+	m.removePlayerUnsafe(playerId)
 	m.Node.Mu.Unlock()
 
 	// Если игрок был DEPUTY, назначаем нового (БЕЗ мьютекса, так как внутри SendMessage)
 	if wasDeputy {
+		log.Printf("DEPUTY (player ID: %d) has timed out, selecting new DEPUTY", playerId)
 		m.findNewDeputy()
 	}
 }
@@ -263,7 +380,23 @@ func (m *Master) findNewDeputy() {
 	m.Node.Mu.Lock()
 	var playerToAssign *pb.GamePlayer
 	for _, player := range m.players.Players {
-		if player.GetRole() == pb.NodeRole_NORMAL {
+		// Пропускаем себя
+		if player.GetId() == m.Node.PlayerInfo.GetId() {
+			continue
+		}
+		// Только NORMAL игроки могут стать DEPUTY (не VIEWER!)
+		if player.GetRole() != pb.NodeRole_NORMAL {
+			continue
+		}
+		// Проверяем что у игрока есть живая змейка
+		hasAliveSnake := false
+		for _, snake := range m.Node.State.Snakes {
+			if snake.GetPlayerId() == player.GetId() && snake.GetState() == pb.GameState_Snake_ALIVE {
+				hasAliveSnake = true
+				break
+			}
+		}
+		if hasAliveSnake {
 			playerToAssign = player
 			break
 		}
@@ -273,6 +406,8 @@ func (m *Master) findNewDeputy() {
 	// Вызываем assignDeputy БЕЗ мьютекса, так как внутри SendMessage
 	if playerToAssign != nil {
 		m.assignDeputy(playerToAssign)
+	} else {
+		log.Printf("No NORMAL players with alive snakes available to become DEPUTY")
 	}
 }
 
@@ -337,6 +472,15 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 				break
 			}
 		}
+
+		// Проверяем, остались ли активные игроки (не VIEWER)
+		if m.checkGameEnd() {
+			m.Node.Mu.Unlock()
+			log.Printf("All active players have left. Game is ending.")
+			m.endGame()
+			return
+		}
+
 		m.Node.Mu.Unlock()
 	default:
 		log.Printf("Received unknown RoleChangeMsg from player ID: %d", msg.GetSenderId())
@@ -354,4 +498,32 @@ func (m *Master) stopMaster() {
 	m.announcement.CanJoin = proto.Bool(false)
 	// Останавливаем функции мастера
 	log.Println("Master is now a VIEWER. Continuing as an observer.")
+}
+
+// checkGameEnd проверяет, остались ли активные игроки (вызывать с захваченным мьютексом)
+func (m *Master) checkGameEnd() bool {
+	activePlayersCount := 0
+	for _, player := range m.players.Players {
+		// Считаем только не-VIEWER игроков
+		if player.GetRole() != pb.NodeRole_VIEWER {
+			activePlayersCount++
+		}
+	}
+
+	// Игра завершается, если не осталось активных игроков
+	return activePlayersCount == 0
+}
+
+// endGame завершает игру
+func (m *Master) endGame() {
+	log.Println("=== GAME OVER ===")
+	log.Println("All players have left the game. Game is ending.")
+
+	// Помечаем игру как завершенную
+	m.announcement.CanJoin = proto.Bool(false)
+
+	// Опционально: можно закрыть соединения или выполнить cleanup
+	// Но по заданию информация о завершенной игре не обязана нигде сохраняться
+
+	log.Println("Game ended successfully.")
 }

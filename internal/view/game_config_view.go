@@ -1,0 +1,156 @@
+package view
+
+import (
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/widget"
+	"google.golang.org/protobuf/proto"
+	"image/color"
+	"snake-net-game/internal/controller"
+	pb "snake-net-game/pkg/proto"
+	"strconv"
+)
+
+// GameConfigView представляет экран настройки игры
+type GameConfigView struct {
+	window     fyne.Window
+	controller *controller.GameController
+}
+
+// NewGameConfigView создает новое представление конфигурации
+func NewGameConfigView(window fyne.Window, controller *controller.GameController) *GameConfigView {
+	return &GameConfigView{
+		window:     window,
+		controller: controller,
+	}
+}
+
+// Show отображает настройки игры
+func (gcv *GameConfigView) Show() {
+	// Заголовок
+	title := canvas.NewText("⚙️ Настройки новой игры", color.White)
+	title.TextSize = 28
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	title.Alignment = fyne.TextAlignCenter
+
+	subtitle := canvas.NewText("Настройте параметры игрового поля", color.RGBA{R: 203, G: 213, B: 225, A: 255})
+	subtitle.TextSize = 14
+	subtitle.Alignment = fyne.TextAlignCenter
+
+	// Поля ввода с предустановленными значениями
+	widthEntry := widget.NewEntry()
+	widthEntry.SetText("25")
+	widthEntry.SetPlaceHolder("10-100")
+
+	heightEntry := widget.NewEntry()
+	heightEntry.SetText("25")
+	heightEntry.SetPlaceHolder("10-100")
+
+	foodEntry := widget.NewEntry()
+	foodEntry.SetText("10")
+	foodEntry.SetPlaceHolder("0-100")
+
+	delayEntry := widget.NewEntry()
+	delayEntry.SetText("180")
+	delayEntry.SetPlaceHolder("100-3000")
+
+	// Создаем стилизованную форму
+	formCard := gcv.createFormCard(widthEntry, heightEntry, foodEntry, delayEntry)
+
+	// Кнопки
+	startButton := widget.NewButton("🎮 Начать игру", func() {
+		width, _ := strconv.Atoi(widthEntry.Text)
+		height, _ := strconv.Atoi(heightEntry.Text)
+		food, _ := strconv.Atoi(foodEntry.Text)
+		delay, _ := strconv.Atoi(delayEntry.Text)
+
+		config := &pb.GameConfig{
+			Width:        proto.Int32(int32(width)),
+			Height:       proto.Int32(int32(height)),
+			FoodStatic:   proto.Int32(int32(food)),
+			StateDelayMs: proto.Int32(int32(delay)),
+		}
+
+		masterView := NewMasterGameView(gcv.window, gcv.controller, config)
+		masterView.Show()
+	})
+	startButton.Importance = widget.HighImportance
+
+	backButton := widget.NewButton("⬅️ Назад", func() {
+		mainView := NewMainView(gcv.window, gcv.controller)
+		mainView.ShowMainMenu()
+	})
+
+	// Компонуем элементы
+	content := container.NewVBox(
+		layout.NewSpacer(),
+		container.NewCenter(title),
+		container.NewCenter(subtitle),
+		layout.NewSpacer(),
+		formCard,
+		layout.NewSpacer(),
+		container.NewCenter(
+			container.NewHBox(
+				backButton,
+				startButton,
+			),
+		),
+		layout.NewSpacer(),
+	)
+
+	gcv.window.SetContent(container.NewPadded(content))
+}
+
+// createFormCard создает карточку с полями формы
+func (gcv *GameConfigView) createFormCard(widthEntry, heightEntry, foodEntry, delayEntry *widget.Entry) *fyne.Container {
+	cardBg := canvas.NewRectangle(CardBackground)
+	cardBg.CornerRadius = 10
+
+	formItems := container.NewVBox()
+
+	// Ширина поля
+	widthLabel := canvas.NewText("Ширина поля", color.White)
+	widthLabel.TextStyle = fyne.TextStyle{Bold: true}
+	widthDesc := widget.NewLabel("Количество клеток по горизонтали")
+	widthDesc.TextStyle = fyne.TextStyle{Italic: true}
+	formItems.Add(widthLabel)
+	formItems.Add(widthEntry)
+	formItems.Add(widthDesc)
+	formItems.Add(widget.NewSeparator())
+
+	// Высота поля
+	heightLabel := canvas.NewText("Высота поля", color.White)
+	heightLabel.TextStyle = fyne.TextStyle{Bold: true}
+	heightDesc := widget.NewLabel("Количество клеток по вертикали")
+	heightDesc.TextStyle = fyne.TextStyle{Italic: true}
+	formItems.Add(heightLabel)
+	formItems.Add(heightEntry)
+	formItems.Add(heightDesc)
+	formItems.Add(widget.NewSeparator())
+
+	// Количество еды
+	foodLabel := canvas.NewText("Количество еды", color.White)
+	foodLabel.TextStyle = fyne.TextStyle{Bold: true}
+	foodDesc := widget.NewLabel("Статическое количество еды на поле")
+	foodDesc.TextStyle = fyne.TextStyle{Italic: true}
+	formItems.Add(foodLabel)
+	formItems.Add(foodEntry)
+	formItems.Add(foodDesc)
+	formItems.Add(widget.NewSeparator())
+
+	// Задержка
+	delayLabel := canvas.NewText("Задержка (мс)", color.White)
+	delayLabel.TextStyle = fyne.TextStyle{Bold: true}
+	delayDesc := widget.NewLabel("Задержка между ходами в миллисекундах")
+	delayDesc.TextStyle = fyne.TextStyle{Italic: true}
+	formItems.Add(delayLabel)
+	formItems.Add(delayEntry)
+	formItems.Add(delayDesc)
+
+	cardContent := container.NewPadded(formItems)
+	card := container.NewStack(cardBg, cardContent)
+
+	return container.NewCenter(card)
+}

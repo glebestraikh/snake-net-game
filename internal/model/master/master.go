@@ -58,16 +58,27 @@ func NewMaster(multicastConn *net.UDPConn, config *pb.GameConfig) *Master {
 		Players:    players,
 	}
 
+	// Создаем змейку мастера длиной 2 клетки
+	headX := config.GetWidth() / 2
+	headY := config.GetHeight() / 2
+	// Хвост слева от головы
+	tailX := (headX - 1 + config.GetWidth()) % config.GetWidth()
+	tailY := headY
+
 	masterSnake := &pb.GameState_Snake{
 		PlayerId: proto.Int32(masterPlayer.GetId()),
 		Points: []*pb.GameState_Coord{
 			{
-				X: proto.Int32(config.GetWidth() / 2),
-				Y: proto.Int32(config.GetHeight() / 2),
+				X: proto.Int32(headX),
+				Y: proto.Int32(headY),
+			},
+			{
+				X: proto.Int32(tailX),
+				Y: proto.Int32(tailY),
 			},
 		},
 		State:         pb.GameState_Snake_ALIVE.Enum(),
-		HeadDirection: pb.Direction_RIGHT.Enum(),
+		HeadDirection: pb.Direction_RIGHT.Enum(), // Движется вправо (противоположно хвосту)
 	}
 
 	state.Snakes = append(state.Snakes, masterSnake)
@@ -89,43 +100,33 @@ func NewMaster(multicastConn *net.UDPConn, config *pb.GameConfig) *Master {
 	}
 }
 
-//func NewDeputyMaster(node *common.Node, newMaster *pb.GamePlayer, lastStateMsg int64) *Master {
-//	newMaster.Role = pb.NodeRole_MASTER.Enum()
-//
-//	config := node.Config
-//
-//	unicastConn := node.UnicastConn
-//
-//	state := node.State
-//
-//	announcement := &pb.GameAnnouncement{
-//		Players:  state.Players,
-//		Config:   config,
-//		CanJoin:  proto.Bool(true),
-//		GameName: proto.String("Game"),
-//	}
-//
-//	multicastConn := node.MulticastConn
-//
-//	newNode := common.NewNode(state, config, multicastConn, unicastConn, newMaster)
-//
-//	return &Master{
-//		Node:         newNode,
-//		announcement: announcement,
-//		players:      state.Players,
-//		lastStateMsg: lastStateMsg,
-//	}
-//}
+// NewMasterFromPlayer создает мастера из существующего игрока (когда DEPUTY становится MASTER)
+func NewMasterFromPlayer(node *common.Node, players *pb.GamePlayers, lastStateMsg int32) *Master {
+	announcement := &pb.GameAnnouncement{
+		Players:  players,
+		Config:   node.Config,
+		CanJoin:  proto.Bool(true),
+		GameName: proto.String("Game1"),
+	}
+
+	return &Master{
+		Node:                   node,
+		announcement:           announcement,
+		players:                players,
+		lastStateMsg:           lastStateMsg,
+		crashedPlayersToNotify: nil,
+	}
+}
 
 // Start запуск мастера
 func (m *Master) Start() {
-	go m.sendAnnouncementMessage()                                       // каждую секунду шлёт Announcement по multicast
-	go m.receiveMessages()                                               // принимает Unicast сообщения (Join, Steer, Ping…)
-	go m.receiveMulticastMessages()                                      // принимает DiscoverMsg
-	go m.checkTimeouts()                                                 // следит, что игроки не пропали
-	go m.sendStateMessage()                                              // пересчитывает мир и шлёт StateMsg
-	go m.Node.ResendUnconfirmedMessages(m.Node.Config.GetStateDelayMs()) // переотправка Msg без ACK
-	go m.Node.SendPings(m.Node.Config.GetStateDelayMs())                 // шлёт PING если долго не было unicast
+	go m.sendAnnouncementMessage()                                         // каждую секунду шлёт Announcement по multicast
+	go m.receiveMessages()                                                 // принимает Unicast сообщения (Join, Steer, Ping…)
+	go m.receiveMulticastMessages()                                        // принимает DiscoverMsg
+	go m.checkTimeouts()                                                   // следит, что игроки не пропали
+	go m.sendStateMessage()                                                // пересчитывает мир и шлёт StateMsg
+	m.Node.StartResendUnconfirmedMessages(m.Node.Config.GetStateDelayMs()) // переотправка Msg без ACK
+	m.Node.StartSendPings(m.Node.Config.GetStateDelayMs())                 // шлёт PING если долго не было unicast
 }
 
 // отправка AnnouncementMsg
@@ -289,6 +290,10 @@ func (m *Master) sendStateMessage() {
 
 		newStateOrder := m.Node.State.GetStateOrder() + 1
 		m.Node.State.StateOrder = proto.Int32(newStateOrder)
+
+		// ВАЖНО: Синхронизируем m.players с m.Node.State.Players
+		// Это гарантирует, что все счета актуальны перед отправкой
+		m.Node.State.Players = m.players
 
 		// Копируем данные состояния и адреса игроков перед освобождением мьютекса
 		snakesCopy := m.Node.State.GetSnakes()

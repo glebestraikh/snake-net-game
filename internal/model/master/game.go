@@ -113,6 +113,13 @@ func (m *Master) moveSnake(snake *pb.GameState_Snake) {
 				break
 			}
 		}
+		// Также обновляем в State.Players для синхронизации
+		for _, player := range m.Node.State.Players.GetPlayers() {
+			if player.GetId() == snakeId {
+				player.Score = proto.Int32(player.GetScore() + 1)
+				break
+			}
+		}
 	}
 }
 
@@ -200,7 +207,15 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 	}
 
 	if crashedPlayerId != killer {
+		// Обновляем счет в m.players
 		for _, player := range m.players.Players {
+			if player.GetId() == killer {
+				player.Score = proto.Int32(player.GetScore() + 1)
+				break
+			}
+		}
+		// Также обновляем в State.Players для синхронизации
+		for _, player := range m.Node.State.Players.GetPlayers() {
 			if player.GetId() == killer {
 				player.Score = proto.Int32(player.GetScore() + 1)
 				break
@@ -238,12 +253,21 @@ func (m *Master) hasFreeSquare(state *pb.GameState, config *pb.GameConfig, squar
 		occupied[i] = make([]bool, config.GetHeight())
 	}
 
+	// Отмечаем клетки, занятые змейками
 	for _, snake := range state.Snakes {
 		for _, point := range snake.Points {
 			x, y := point.GetX(), point.GetY()
 			if x >= 0 && x < config.GetWidth() && y >= 0 && y < config.GetHeight() {
 				occupied[x][y] = true
 			}
+		}
+	}
+
+	// Отмечаем клетки с едой - на них нельзя размещать новую змейку
+	for _, food := range state.Foods {
+		x, y := food.GetX(), food.GetY()
+		if x >= 0 && x < config.GetWidth() && y >= 0 && y < config.GetHeight() {
+			occupied[x][y] = true
 		}
 	}
 

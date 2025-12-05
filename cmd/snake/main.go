@@ -5,7 +5,6 @@ import (
 )
 
 func main() {
-	// Используем MVC архитектуру
-	app := mvc.NewApp()
-	app.Run()
+	application := mvc.NewApp()
+	application.Run()
 }
