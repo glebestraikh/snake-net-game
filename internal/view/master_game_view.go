@@ -86,6 +86,6 @@ func (mgv *MasterGameView) startGameLoop(masterNode *master.Master, gameContent 
 		mgv.nameLabel.SetText(fmt.Sprintf("Имя: %v", name))
 		mgv.roleLabel.SetText(fmt.Sprintf("Роль: %v", role))
 		mgv.renderer.RenderGameState(gameContent, state, config)
-		mgv.infoPanel.UpdateInfoPanel(state)
+		mgv.infoPanel.UpdateInfoPanel(state, role)
 	})
 }

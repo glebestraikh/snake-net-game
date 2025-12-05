@@ -248,38 +248,46 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 }
 
 func (m *Master) hasFreeSquare(state *pb.GameState, config *pb.GameConfig, squareSize int32) (bool, *pb.GameState_Coord) {
-	occupied := make([][]bool, config.GetWidth())
+	width := config.GetWidth()
+	height := config.GetHeight()
+
+	occupied := make([][]bool, width)
 	for i := range occupied {
-		occupied[i] = make([]bool, config.GetHeight())
+		occupied[i] = make([]bool, height)
 	}
 
 	// Отмечаем клетки, занятые змейками
 	for _, snake := range state.Snakes {
 		for _, point := range snake.Points {
-			x, y := point.GetX(), point.GetY()
-			if x >= 0 && x < config.GetWidth() && y >= 0 && y < config.GetHeight() {
-				occupied[x][y] = true
-			}
-		}
-	}
-
-	// Отмечаем клетки с едой - на них нельзя размещать новую змейку
-	for _, food := range state.Foods {
-		x, y := food.GetX(), food.GetY()
-		if x >= 0 && x < config.GetWidth() && y >= 0 && y < config.GetHeight() {
+			x := ((point.GetX() % width) + width) % width
+			y := ((point.GetY() % height) + height) % height
 			occupied[x][y] = true
 		}
 	}
 
-	for startX := int32(0); startX <= config.GetWidth()-squareSize; startX++ {
-		for startY := int32(0); startY <= config.GetHeight()-squareSize; startY++ {
-			if isSquareFree(occupied, startX, startY, squareSize) {
+	// Проверяем все возможные начальные точки квадрата (с учётом тора)
+	for startX := int32(0); startX < width; startX++ {
+		for startY := int32(0); startY < height; startY++ {
+			if isSquareFreeOnTorus(occupied, startX, startY, squareSize, width, height) {
 				return true, &pb.GameState_Coord{X: proto.Int32(startX), Y: proto.Int32(startY)}
 			}
 		}
 	}
 
 	return false, nil
+}
+
+func isSquareFreeOnTorus(occupied [][]bool, startX, startY, squareSize, width, height int32) bool {
+	for dx := int32(0); dx < squareSize; dx++ {
+		for dy := int32(0); dy < squareSize; dy++ {
+			x := (startX + dx) % width
+			y := (startY + dy) % height
+			if occupied[x][y] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func isSquareFree(occupied [][]bool, startX, startY, squareSize int32) bool {

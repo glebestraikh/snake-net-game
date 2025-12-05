@@ -295,12 +295,25 @@ func (m *Master) handleSteerMessage(steerMsg *pb.GameMessage_SteerMsg, playerId 
 
 // обработка отвалившихся узлов
 func (m *Master) checkTimeouts() {
+	defer m.wg.Done()
 	ticker := time.NewTicker(time.Duration(0.8*float64(m.Node.Config.GetStateDelayMs())) * time.Millisecond)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-m.stopChan:
+			log.Printf("Master checkTimeouts stopped")
+			return
+		case <-ticker.C:
+		}
+
 		now := time.Now()
 		m.Node.Mu.Lock()
+		// Проверяем, остановлен ли мастер
+		if m.stopped {
+			m.Node.Mu.Unlock()
+			return
+		}
 		// Копируем map для безопасной итерации
 		interactionsCopy := make(map[int32]time.Time)
 		for playerId, lastInteraction := range m.Node.LastInteraction {
@@ -488,16 +501,35 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 }
 
 func (m *Master) stopMaster() {
-	log.Println("Switching PlayerInfo role to VIEWER...")
+	log.Println("Stopping Master goroutines...")
 
-	// Меняем роль мастера
+	// Устанавливаем флаг остановки
+	m.Node.Mu.Lock()
+	if m.stopped {
+		m.Node.Mu.Unlock()
+		log.Println("Master already stopped")
+		return
+	}
+	m.stopped = true
+	m.Node.Mu.Unlock()
+
+	// Закрываем канал остановки - это остановит все горутины мастера
+	close(m.stopChan)
+
+	// Меняем роль мастера на VIEWER
 	m.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
+
 	// Делаем змею мастера ZOMBIE
+	m.Node.Mu.Lock()
 	m.makeSnakeZombie(m.Node.PlayerInfo.GetId())
+	m.Node.Mu.Unlock()
 
 	m.announcement.CanJoin = proto.Bool(false)
-	// Останавливаем функции мастера
-	log.Println("Master is now a VIEWER. Continuing as an observer.")
+
+	// Останавливаем горутины Node (resend, ping)
+	m.Node.StopNodeGoroutines()
+
+	log.Println("Master stopped. Now a VIEWER/observer.")
 }
 
 // checkGameEnd проверяет, остались ли активные игроки (вызывать с захваченным мьютексом)

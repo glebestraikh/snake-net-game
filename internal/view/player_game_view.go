@@ -92,6 +92,6 @@ func (pgv *PlayerGameView) startGameLoop(gameContent *fyne.Container) {
 		pgv.nameLabel.SetText(fmt.Sprintf("Имя: %v", name))
 		pgv.roleLabel.SetText(fmt.Sprintf("Роль: %v", role))
 		pgv.renderer.RenderGameState(gameContent, state, config)
-		pgv.infoPanel.UpdateInfoPanel(state)
+		pgv.infoPanel.UpdateInfoPanel(state, role)
 	})
 }

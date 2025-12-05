@@ -7,6 +7,7 @@ import (
 	"net"
 	"snake-net-game/internal/model/common"
 	pb "snake-net-game/pkg/proto"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,10 @@ type Master struct {
 	players                *pb.GamePlayers
 	lastStateMsg           int32
 	crashedPlayersToNotify []*net.UDPAddr // Адреса игроков, которым нужно отправить ErrorMsg после освобождения мьютекса
+
+	stopChan chan struct{}  // канал для остановки горутин Master
+	wg       sync.WaitGroup // для отслеживания завершения горутин
+	stopped  bool           // флаг, что мастер остановлен
 }
 
 // NewMaster создает нового мастера
@@ -97,6 +102,8 @@ func NewMaster(multicastConn *net.UDPConn, config *pb.GameConfig) *Master {
 		announcement: announcement,
 		players:      players,
 		lastStateMsg: 0,
+		stopChan:     make(chan struct{}),
+		stopped:      false,
 	}
 }
 
@@ -115,11 +122,14 @@ func NewMasterFromPlayer(node *common.Node, players *pb.GamePlayers, lastStateMs
 		players:                players,
 		lastStateMsg:           lastStateMsg,
 		crashedPlayersToNotify: nil,
+		stopChan:               make(chan struct{}),
+		stopped:                false,
 	}
 }
 
 // Start запуск мастера
 func (m *Master) Start() {
+	m.wg.Add(5)                                                            // 5 горутин мастера
 	go m.sendAnnouncementMessage()                                         // каждую секунду шлёт Announcement по multicast
 	go m.receiveMessages()                                                 // принимает Unicast сообщения (Join, Steer, Ping…)
 	go m.receiveMulticastMessages()                                        // принимает DiscoverMsg
@@ -131,32 +141,53 @@ func (m *Master) Start() {
 
 // отправка AnnouncementMsg
 func (m *Master) sendAnnouncementMessage() {
+	defer m.wg.Done()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		announcementMsg := &pb.GameMessage{
-			MsgSeq: proto.Int64(1),
-			Type: &pb.GameMessage_Announcement{
-				Announcement: &pb.GameMessage_AnnouncementMsg{
-					Games: []*pb.GameAnnouncement{m.announcement},
+	for {
+		select {
+		case <-m.stopChan:
+			log.Printf("Master sendAnnouncementMessage stopped")
+			return
+		case <-ticker.C:
+			announcementMsg := &pb.GameMessage{
+				MsgSeq: proto.Int64(1),
+				Type: &pb.GameMessage_Announcement{
+					Announcement: &pb.GameMessage_AnnouncementMsg{
+						Games: []*pb.GameAnnouncement{m.announcement},
+					},
 				},
-			},
+			}
+			multicastAddr, err := net.ResolveUDPAddr("udp", m.Node.MulticastAddress)
+			if err != nil {
+				log.Fatalf("Error resolving multicast address: %v", err)
+			}
+			m.Node.SendMessage(announcementMsg, multicastAddr)
 		}
-		multicastAddr, err := net.ResolveUDPAddr("udp", m.Node.MulticastAddress)
-		if err != nil {
-			log.Fatalf("Error resolving multicast address: %v", err)
-		}
-		m.Node.SendMessage(announcementMsg, multicastAddr)
 	}
 }
 
 // получение мультикаст сообщений
 func (m *Master) receiveMulticastMessages() {
+	defer m.wg.Done()
 	for {
+		select {
+		case <-m.stopChan:
+			log.Printf("Master receiveMulticastMessages stopped")
+			return
+		default:
+		}
+
+		// Устанавливаем короткий таймаут для возможности проверки stopChan
+		_ = m.Node.MulticastConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+
 		buf := make([]byte, 4096)
 		n, addr, err := m.Node.MulticastConn.ReadFromUDP(buf)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue // Таймаут - нормальное поведение
+			}
 			log.Printf("Error receiving multicast message: %v", err)
 			continue
 		}
@@ -192,10 +223,24 @@ func (m *Master) handleMulticastMessage(msg *pb.GameMessage, addr *net.UDPAddr) 
 
 // получение юникаст сообщений
 func (m *Master) receiveMessages() {
+	defer m.wg.Done()
 	for {
+		select {
+		case <-m.stopChan:
+			log.Printf("Master receiveMessages stopped")
+			return
+		default:
+		}
+
+		// Устанавливаем короткий таймаут для возможности проверки stopChan
+		_ = m.Node.UnicastConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+
 		buf := make([]byte, 4096)
 		n, addr, err := m.Node.UnicastConn.ReadFromUDP(buf)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue // Таймаут - нормальное поведение
+			}
 			log.Printf("Error receiving message: %v", err)
 			continue
 		}
@@ -280,11 +325,24 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 
 // рассылаем всем игрокам состояние игры
 func (m *Master) sendStateMessage() {
+	defer m.wg.Done()
 	ticker := time.NewTicker(time.Duration(m.Node.Config.GetStateDelayMs()) * time.Millisecond)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-m.stopChan:
+			log.Printf("Master sendStateMessage stopped")
+			return
+		case <-ticker.C:
+		}
+
 		m.Node.Mu.Lock()
+		// Проверяем, остановлен ли мастер
+		if m.stopped {
+			m.Node.Mu.Unlock()
+			return
+		}
 		m.GenerateFood()
 		m.UpdateGameState()
 

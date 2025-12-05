@@ -13,10 +13,11 @@ import (
 
 // InfoPanel представляет информационную панель
 type InfoPanel struct {
-	container      *fyne.Container
-	scoreTable     *widget.Table
-	foodCountLabel *widget.Label
-	tableData      [][]string
+	container          *fyne.Container
+	scoreTable         *widget.Table
+	foodCountLabel     *widget.Label
+	tableData          [][]string
+	becomeViewerButton *widget.Button
 }
 
 // NewInfoPanel создает новую информационную панель
@@ -83,6 +84,8 @@ func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBec
 
 	becomeViewerButton := widget.NewButton("👁️ Стать наблюдателем", onBecomeViewer)
 	becomeViewerButton.Importance = widget.WarningImportance
+	becomeViewerButton.Hide() // По умолчанию скрыта, показывается только для NORMAL
+	panel.becomeViewerButton = becomeViewerButton
 
 	exitButton := widget.NewButton("❌ Выйти", onExit)
 	exitButton.Importance = widget.DangerImportance
@@ -142,7 +145,7 @@ func (ip *InfoPanel) GetFoodCountLabel() *widget.Label {
 }
 
 // UpdateInfoPanel обновляет информационную панель
-func (ip *InfoPanel) UpdateInfoPanel(state *pb.GameState) {
+func (ip *InfoPanel) UpdateInfoPanel(state *pb.GameState, playerRole pb.NodeRole) {
 	ip.tableData = [][]string{
 		{"Имя", "Счёт"},
 	}
@@ -158,6 +161,14 @@ func (ip *InfoPanel) UpdateInfoPanel(state *pb.GameState) {
 	}
 
 	ip.foodCountLabel.SetText(fmt.Sprintf("🍎 Еда: %d", len(state.Foods)))
+
+	// Обновляем видимость кнопки "Стать наблюдателем"
+	// Кнопка доступна только для NORMAL игроков
+	if playerRole == pb.NodeRole_NORMAL {
+		ip.becomeViewerButton.Show()
+	} else {
+		ip.becomeViewerButton.Hide()
+	}
 
 	// ВАЖНО: Вызываем Refresh() чтобы UI обновился
 	ip.scoreTable.Refresh()
