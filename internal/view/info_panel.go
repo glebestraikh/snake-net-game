@@ -18,14 +18,16 @@ type InfoPanel struct {
 	foodCountLabel     *widget.Label
 	tableData          [][]string
 	becomeViewerButton *widget.Button
+	isViewer           bool // Флаг, если пользователь присоединился как VIEWER
 }
 
 // NewInfoPanel создает новую информационную панель
-func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBecomeViewer func(), scoreLabel *widget.Label, nameLabel *widget.Label, roleLabel *widget.Label) *InfoPanel {
+func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBecomeViewer func(), scoreLabel *widget.Label, nameLabel *widget.Label, roleLabel *widget.Label, isViewer bool) *InfoPanel {
 	panel := &InfoPanel{
 		tableData: [][]string{
 			{"Имя", "Счёт"},
 		},
+		isViewer: isViewer,
 	}
 
 	// Таблица со счетом
@@ -84,7 +86,12 @@ func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBec
 
 	becomeViewerButton := widget.NewButton("👁️ Стать наблюдателем", onBecomeViewer)
 	becomeViewerButton.Importance = widget.WarningImportance
-	becomeViewerButton.Hide() // По умолчанию скрыта, показывается только для NORMAL
+	// Скрываем кнопку по умолчанию и для VIEWER
+	if isViewer {
+		becomeViewerButton.Hide()
+	} else {
+		becomeViewerButton.Hide() // По умолчанию скрыта, показывается только для NORMAL
+	}
 	panel.becomeViewerButton = becomeViewerButton
 
 	exitButton := widget.NewButton("❌ Выйти", onExit)
@@ -144,6 +151,22 @@ func (ip *InfoPanel) GetFoodCountLabel() *widget.Label {
 	return ip.foodCountLabel
 }
 
+// FormatRole форматирует роль с эмодзи для красивого отображения
+func FormatRole(role pb.NodeRole) string {
+	switch role {
+	case pb.NodeRole_MASTER:
+		return "👑 Мастер"
+	case pb.NodeRole_DEPUTY:
+		return "🤡 Заместитель"
+	case pb.NodeRole_VIEWER:
+		return "👁️ Наблюдатель"
+	case pb.NodeRole_NORMAL:
+		return "🎮 Игрок"
+	default:
+		return fmt.Sprintf("%v", role)
+	}
+}
+
 // UpdateInfoPanel обновляет информационную панель
 func (ip *InfoPanel) UpdateInfoPanel(state *pb.GameState, playerRole pb.NodeRole) {
 	ip.tableData = [][]string{
@@ -157,14 +180,17 @@ func (ip *InfoPanel) UpdateInfoPanel(state *pb.GameState, playerRole pb.NodeRole
 		if gamePlayer.GetRole() == pb.NodeRole_DEPUTY {
 			playerName += " 🤡"
 		}
+		if gamePlayer.GetRole() == pb.NodeRole_VIEWER {
+			playerName += " 👁️"
+		}
 		ip.tableData = append(ip.tableData, []string{playerName, fmt.Sprintf("%d", gamePlayer.GetScore())})
 	}
 
 	ip.foodCountLabel.SetText(fmt.Sprintf("🍎 Еда: %d", len(state.Foods)))
 
 	// Обновляем видимость кнопки "Стать наблюдателем"
-	// Кнопка доступна только для NORMAL игроков
-	if playerRole == pb.NodeRole_NORMAL {
+	// Кнопка доступна только для NORMAL игроков И если изначально не присоединялись как VIEWER
+	if playerRole == pb.NodeRole_NORMAL && !ip.isViewer {
 		ip.becomeViewerButton.Show()
 	} else {
 		ip.becomeViewerButton.Hide()

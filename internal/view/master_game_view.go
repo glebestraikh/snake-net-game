@@ -60,7 +60,7 @@ func (mgv *MasterGameView) Show() {
 			// Стать наблюдателем (для мастера пока недоступно)
 			// TODO: реализовать переход мастера в VIEWER
 		},
-		mgv.scoreLabel, mgv.nameLabel, mgv.roleLabel)
+		mgv.scoreLabel, mgv.nameLabel, mgv.roleLabel, false)
 
 	splitContent := container.NewHSplit(
 		gameContent,
@@ -84,7 +84,7 @@ func (mgv *MasterGameView) startGameLoop(masterNode *master.Master, gameContent 
 	mgv.controller.StartGameLoop(masterNode.Node, func(state *pb.GameState, config *pb.GameConfig, score int32, name string, role pb.NodeRole) {
 		mgv.scoreLabel.SetText(fmt.Sprintf("Счет: %d", score))
 		mgv.nameLabel.SetText(fmt.Sprintf("Имя: %v", name))
-		mgv.roleLabel.SetText(fmt.Sprintf("Роль: %v", role))
+		mgv.roleLabel.SetText(fmt.Sprintf("Роль: %s", FormatRole(role)))
 		mgv.renderer.RenderGameState(gameContent, state, config)
 		mgv.infoPanel.UpdateInfoPanel(state, role)
 	})

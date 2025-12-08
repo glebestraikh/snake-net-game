@@ -41,6 +41,12 @@ func (gc *GameController) JoinGame(playerNode *player.Player, playerName string,
 	playerNode.MasterAddr = selectedGame.MasterAddr
 	playerNode.AnnouncementMsg = selectedGame.AnnouncementMsg
 	playerNode.IsViewer = isViewer
+
+	// Устанавливаем роль сразу, если присоединяемся как VIEWER
+	if isViewer {
+		playerNode.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
+	}
+
 	playerNode.Start()
 }
 

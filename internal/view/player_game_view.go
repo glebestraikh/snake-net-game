@@ -66,7 +66,7 @@ func (pgv *PlayerGameView) Show() {
 			// Стать наблюдателем
 			pgv.controller.BecomeViewerForPlayer(pgv.playerNode)
 		},
-		pgv.scoreLabel, pgv.nameLabel, pgv.roleLabel)
+		pgv.scoreLabel, pgv.nameLabel, pgv.roleLabel, pgv.isViewer)
 
 	splitContent := container.NewHSplit(
 		gameContent,
@@ -90,7 +90,7 @@ func (pgv *PlayerGameView) startGameLoop(gameContent *fyne.Container) {
 	pgv.controller.StartGameLoopForPlayer(pgv.playerNode, func(state *pb.GameState, config *pb.GameConfig, score int32, name string, role pb.NodeRole) {
 		pgv.scoreLabel.SetText(fmt.Sprintf("Счет: %d", score))
 		pgv.nameLabel.SetText(fmt.Sprintf("Имя: %v", name))
-		pgv.roleLabel.SetText(fmt.Sprintf("Роль: %v", role))
+		pgv.roleLabel.SetText(fmt.Sprintf("Роль: %s", FormatRole(role)))
 		pgv.renderer.RenderGameState(gameContent, state, config)
 		pgv.infoPanel.UpdateInfoPanel(state, role)
 	})
