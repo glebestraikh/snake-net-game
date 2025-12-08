@@ -13,6 +13,11 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 	// Обновляем роль игрока
 	p.Node.PlayerInfo.Role = newRole.Enum()
 
+	// Если переходим в режим VIEWER, обновляем флаг
+	if newRole == pb.NodeRole_VIEWER {
+		p.IsViewer = true
+	}
+
 	// Обновляем роль в состоянии игры, если оно доступно
 	if p.Node.State != nil && p.Node.State.Players != nil {
 		for _, player := range p.Node.State.Players.Players {

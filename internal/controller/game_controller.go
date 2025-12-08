@@ -61,6 +61,7 @@ func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 	// Проверяем что игрок NORMAL (не MASTER и не DEPUTY)
 	playerNode.Node.Mu.Lock()
 	currentRole := playerNode.Node.PlayerInfo.GetRole()
+	playerId := playerNode.Node.PlayerInfo.GetId()
 	if currentRole != pb.NodeRole_NORMAL {
 		playerNode.Node.Mu.Unlock()
 		return // MASTER и DEPUTY не могут становиться VIEWER
@@ -73,12 +74,12 @@ func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 
 	roleChangeMsg := &pb.GameMessage{
 		MsgSeq:     proto.Int64(playerNode.Node.MsgSeq),
-		SenderId:   proto.Int32(playerNode.Node.PlayerInfo.GetId()),
+		SenderId:   proto.Int32(playerId),
 		ReceiverId: proto.Int32(1), // MASTER всегда ID 1
 		Type: &pb.GameMessage_RoleChange{
 			RoleChange: &pb.GameMessage_RoleChangeMsg{
-				SenderRole:   pb.NodeRole_VIEWER.Enum(), // Новая роль отправителя
-				ReceiverRole: nil,                       // Роль получателя не меняется
+				SenderRole:   pb.NodeRole_NORMAL.Enum(), // Текущая роль отправителя
+				ReceiverRole: pb.NodeRole_VIEWER.Enum(), // Желаемая новая роль
 			},
 		},
 	}

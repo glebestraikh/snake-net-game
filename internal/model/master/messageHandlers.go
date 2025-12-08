@@ -471,32 +471,67 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 		log.Printf("Deputy has taken over as MASTER. Stopping PlayerInfo.")
 		m.stopMaster()
 
-	case roleChangeMsg.GetReceiverRole() == pb.NodeRole_VIEWER:
-		// Player -> VIEWER
+	case roleChangeMsg.GetSenderRole() == pb.NodeRole_NORMAL && roleChangeMsg.GetReceiverRole() == pb.NodeRole_VIEWER:
+		// NORMAL Player -> VIEWER
 		playerId := msg.GetSenderId()
-		log.Printf("Player ID: %d is now a VIEWER. Converting snake to ZOMBIE.", playerId)
+		log.Printf("Player ID: %d requests to become VIEWER. Converting snake to ZOMBIE.", playerId)
 
 		m.Node.Mu.Lock()
-		m.makeSnakeZombie(playerId)
 
+		// Проверяем был ли игрок DEPUTY - если да, то нужно найти нового
+		wasDeputy := false
+		var playerAddr *net.UDPAddr
 		for _, player := range m.players.Players {
 			if player.GetId() == playerId {
+				if player.GetRole() == pb.NodeRole_DEPUTY {
+					wasDeputy = true
+				}
 				player.Role = pb.NodeRole_VIEWER.Enum()
+				// Сохраняем адрес игрока для отправки подтверждения
+				playerAddr, _ = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort()))
 				break
 			}
 		}
 
+		m.makeSnakeZombie(playerId)
+
 		// Проверяем, остались ли активные игроки (не VIEWER)
-		if m.checkGameEnd() {
-			m.Node.Mu.Unlock()
+		gameEnding := m.checkGameEnd()
+
+		m.Node.Mu.Unlock()
+
+		// Отправляем подтверждение игроку о смене роли
+		if playerAddr != nil {
+			confirmRoleChangeMsg := &pb.GameMessage{
+				MsgSeq:     proto.Int64(m.Node.MsgSeq),
+				SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
+				ReceiverId: proto.Int32(playerId),
+				Type: &pb.GameMessage_RoleChange{
+					RoleChange: &pb.GameMessage_RoleChangeMsg{
+						SenderRole:   pb.NodeRole_MASTER.Enum(),
+						ReceiverRole: pb.NodeRole_VIEWER.Enum(),
+					},
+				},
+			}
+			m.Node.SendMessage(confirmRoleChangeMsg, playerAddr)
+			log.Printf("Sent RoleChange confirmation to player ID: %d", playerId)
+		}
+
+		if gameEnding {
 			log.Printf("All active players have left. Game is ending.")
 			m.endGame()
 			return
 		}
 
-		m.Node.Mu.Unlock()
+		// Если игрок был DEPUTY, назначаем нового
+		if wasDeputy {
+			log.Printf("DEPUTY (player ID: %d) became VIEWER, selecting new DEPUTY", playerId)
+			m.findNewDeputy()
+		}
+
 	default:
-		log.Printf("Received unknown RoleChangeMsg from player ID: %d", msg.GetSenderId())
+		log.Printf("Received unknown RoleChangeMsg from player ID: %d (SenderRole: %v, ReceiverRole: %v)",
+			msg.GetSenderId(), roleChangeMsg.GetSenderRole(), roleChangeMsg.GetReceiverRole())
 	}
 }
 
