@@ -9,11 +9,15 @@ import (
 func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 	roleChangeMsg := msg.GetRoleChange()
 
+	log.Printf("Player ID %d: Received RoleChangeMsg - senderId=%d, receiverId=%d, senderRole=%v, receiverRole=%v",
+		p.Node.PlayerInfo.GetId(), msg.GetSenderId(), msg.GetReceiverId(),
+		roleChangeMsg.GetSenderRole(), roleChangeMsg.GetReceiverRole())
+
 	// Проверяем - это сообщение для нас (receiverId) или о ком-то другом
 	if msg.GetReceiverId() != 0 && msg.GetReceiverId() != p.Node.PlayerInfo.GetId() {
 		// Это сообщение не для нас, игнорируем
-		log.Printf("Received RoleChange message not for us (receiverId=%d, our ID=%d)",
-			msg.GetReceiverId(), p.Node.PlayerInfo.GetId())
+		log.Printf("Player ID %d: Ignoring RoleChange not for us (receiverId=%d, our ID=%d)",
+			p.Node.PlayerInfo.GetId(), msg.GetReceiverId(), p.Node.PlayerInfo.GetId())
 		return
 	}
 
@@ -21,6 +25,7 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 
 	// Обновляем роль игрока
 	p.Node.PlayerInfo.Role = newRole.Enum()
+	log.Printf("Player ID %d: Updated PlayerInfo.Role to %v", p.Node.PlayerInfo.GetId(), newRole)
 
 	// Если переходим в режим VIEWER, обновляем флаг
 	if newRole == pb.NodeRole_VIEWER {

@@ -259,6 +259,21 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 				p.Node.PlayerInfo.GetId(), stateOrder)
 		}
 
+		// ВАЖНО: Синхронизируем роль из StateMsg в PlayerInfo
+		// Это нужно на случай если роль изменилась на сервере
+		for _, player := range p.Node.State.Players.Players {
+			if player.GetId() == p.Node.PlayerInfo.GetId() {
+				oldRole := p.Node.PlayerInfo.GetRole()
+				newRole := player.GetRole()
+				if oldRole != newRole {
+					log.Printf("Player ID %d: Role changed in StateMsg from %v to %v",
+						p.Node.PlayerInfo.GetId(), oldRole, newRole)
+					p.Node.PlayerInfo.Role = player.Role
+				}
+				break
+			}
+		}
+
 		p.Node.Cond.Broadcast()
 		p.Node.Mu.Unlock()
 		// SendAck вызываем БЕЗ мьютекса

@@ -466,6 +466,27 @@ func (m *Master) wasPlayerDeputy(playerId int32) bool {
 
 func (m *Master) findNewDeputy() {
 	m.Node.Mu.Lock()
+
+	// СНАЧАЛА: Меняем роль старого DEPUTY на NORMAL (если есть умерший DEPUTY без змейки)
+	for _, player := range m.players.Players {
+		if player.GetRole() == pb.NodeRole_DEPUTY {
+			// Проверяем есть ли у него змейка
+			hasSnake := false
+			for _, snake := range m.Node.State.Snakes {
+				if snake.GetPlayerId() == player.GetId() {
+					hasSnake = true
+					break
+				}
+			}
+			// Если нет змейки - это старый умерший DEPUTY, меняем роль на NORMAL
+			if !hasSnake {
+				player.Role = pb.NodeRole_NORMAL.Enum()
+				log.Printf("Changed dead DEPUTY (player ID: %d) role to NORMAL before assigning new DEPUTY", player.GetId())
+			}
+		}
+	}
+
+	// ПОТОМ: Ищем нового DEPUTY среди NORMAL игроков с живой змейкой
 	var playerToAssign *pb.GamePlayer
 	for _, player := range m.players.Players {
 		// Пропускаем себя
