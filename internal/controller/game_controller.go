@@ -119,12 +119,21 @@ func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.G
 				configCopy := proto.Clone(node.Config).(*pb.GameConfig)
 
 				var playerScore int32
+				playerFound := false
 				for _, gamePlayer := range node.State.GetPlayers().GetPlayers() {
 					if gamePlayer.GetId() == node.PlayerInfo.GetId() {
 						playerScore = gamePlayer.GetScore()
+						playerFound = true
 						break
 					}
 				}
+
+				// Если игрок не найден в списке (был удален), продолжаем показывать игру со счетом 0
+				// Это позволяет наблюдать за игрой даже после смерти
+				if !playerFound {
+					playerScore = 0
+				}
+
 				playerName := node.PlayerInfo.GetName()
 				playerRole := node.PlayerInfo.GetRole()
 				node.Mu.Unlock()
@@ -161,12 +170,21 @@ func (gc *GameController) StartGameLoopForPlayer(playerNode *player.Player, upda
 				configCopy := proto.Clone(playerNode.Node.Config).(*pb.GameConfig)
 
 				var playerScore int32
+				playerFound := false
 				for _, gamePlayer := range playerNode.Node.State.GetPlayers().GetPlayers() {
 					if gamePlayer.GetId() == playerNode.Node.PlayerInfo.GetId() {
 						playerScore = gamePlayer.GetScore()
+						playerFound = true
 						break
 					}
 				}
+
+				// Если игрок не найден в списке (был удален), продолжаем показывать игру со счетом 0
+				// Это позволяет наблюдать за игрой даже после смерти
+				if !playerFound {
+					playerScore = 0
+				}
+
 				playerName := playerNode.Node.PlayerInfo.GetName()
 				playerRole := playerNode.Node.PlayerInfo.GetRole()
 				playerNode.Node.Mu.Unlock()

@@ -244,6 +244,21 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		}
 		p.LastStateMsg = stateOrder
 		p.Node.State = t.State.GetState()
+
+		// Проверяем есть ли у игрока змейка
+		hasSnake := false
+		for _, snake := range p.Node.State.Snakes {
+			if snake.GetPlayerId() == p.Node.PlayerInfo.GetId() {
+				hasSnake = true
+				break
+			}
+		}
+
+		if !hasSnake {
+			log.Printf("Player ID %d: Received StateMsg but has no snake (observer mode), stateOrder=%d",
+				p.Node.PlayerInfo.GetId(), stateOrder)
+		}
+
 		p.Node.Cond.Broadcast()
 		p.Node.Mu.Unlock()
 		// SendAck вызываем БЕЗ мьютекса
@@ -556,8 +571,10 @@ func (p *Player) becomeMaster() {
 	for _, player := range p.Node.State.Players.Players {
 		if player.GetRole() == pb.NodeRole_MASTER && player.GetId() != p.Node.PlayerInfo.GetId() {
 			oldMasterId = player.GetId()
-			log.Printf("Removing old MASTER (player ID: %d) from game state", oldMasterId)
-			continue
+			// НЕ удаляем старого MASTER! Меняем его роль на VIEWER
+			// чтобы он продолжал получать StateMsg и видеть игру
+			player.Role = pb.NodeRole_VIEWER.Enum()
+			log.Printf("Changed old MASTER (player ID: %d) role to VIEWER in game state", oldMasterId)
 		}
 		if player.GetId() == p.Node.PlayerInfo.GetId() {
 			player.Role = pb.NodeRole_MASTER.Enum()

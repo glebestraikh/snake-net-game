@@ -67,6 +67,21 @@ func (m *Master) UpdateGameState() {
 	}
 
 	m.checkCollisions()
+
+	// Проверяем нужно ли передать роль MASTER (если сам MASTER был убит)
+	if m.needTransferMaster {
+		m.needTransferMaster = false
+		log.Printf("MASTER was killed, transferring control to DEPUTY and becoming observer")
+		// Обработаем это в отдельной горутине после освобождения мьютекса
+		go m.transferMasterToDeputy()
+	}
+
+	// Проверяем нужно ли назначить нового DEPUTY после смерти предыдущего
+	if m.needNewDeputy {
+		m.needNewDeputy = false
+		// Вызываем findNewDeputy БЕЗ мьютекса (он будет захвачен внутри)
+		go m.findNewDeputy()
+	}
 }
 
 func (m *Master) moveSnake(snake *pb.GameState_Snake) {
@@ -224,26 +239,55 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 	}
 
 	if crashedPlayerId != m.Node.PlayerInfo.GetId() {
-		// Сохраняем адрес игрока ДО удаления, чтобы отправить ему ErrorMsg позже
-		var crashedPlayerAddr *net.UDPAddr
+		// Сохраняем информацию о игроке (НЕ удаляем его из списка!)
+		var wasDeputy bool
+		var playerAddr *net.UDPAddr
+
 		for _, player := range m.players.Players {
 			if player.GetId() == crashedPlayerId {
+				wasDeputy = player.GetRole() == pb.NodeRole_DEPUTY
+				// Сохраняем адрес для списка наблюдателей
 				addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
 				addr, err := net.ResolveUDPAddr("udp", addrStr)
 				if err == nil {
-					crashedPlayerAddr = addr
+					playerAddr = addr
 				}
 				break
 			}
 		}
 
-		m.removePlayerUnsafe(crashedPlayerId)
-		log.Printf("Player ID: %d has crashed and been removed.", crashedPlayerId)
+		// НЕ вызываем removePlayerUnsafe! Игрок остается в списке игроков
+		// Это позволяет UI продолжать отображать его роль и счет
+		log.Printf("Player ID: %d has crashed but remains in game as observer.", crashedPlayerId)
 
-		// Сохраняем адрес для отправки ErrorMsg после освобождения мьютекса
-		if crashedPlayerAddr != nil {
-			m.crashedPlayersToNotify = append(m.crashedPlayersToNotify, crashedPlayerAddr)
+		// Добавляем адрес игрока в список наблюдателей
+		// Игрок продолжит получать StateMsg и наблюдать за игрой
+		if playerAddr != nil {
+			// Проверяем, не добавлен ли уже
+			alreadyAdded := false
+			for _, addr := range m.observerAddrs {
+				if addr.String() == playerAddr.String() {
+					alreadyAdded = true
+					break
+				}
+			}
+			if !alreadyAdded {
+				m.observerAddrs = append(m.observerAddrs, playerAddr)
+				log.Printf("Player ID: %d added to observers, will continue receiving game updates", crashedPlayerId)
+			}
 		}
+
+		// Если был DEPUTY, нужно назначить нового после освобождения мьютекса
+		if wasDeputy {
+			log.Printf("DEPUTY (player ID: %d) was killed, need to select new DEPUTY", crashedPlayerId)
+			m.needNewDeputy = true
+		}
+	} else {
+		// Сам MASTER был убит!
+		log.Printf("MASTER (player ID: %d) has been killed!", crashedPlayerId)
+		// MASTER должен передать управление DEPUTY и стать наблюдателем
+		// Устанавливаем флаг что MASTER убит - обработаем это после освобождения мьютекса
+		m.needTransferMaster = true
 	}
 }
 
@@ -299,4 +343,74 @@ func isSquareFree(occupied [][]bool, startX, startY, squareSize int32) bool {
 		}
 	}
 	return true
+}
+
+// transferMasterToDeputy передает роль MASTER к DEPUTY когда сам MASTER был убит
+func (m *Master) transferMasterToDeputy() {
+	m.Node.Mu.Lock()
+
+	// Находим DEPUTY
+	var deputy *pb.GamePlayer
+	for _, player := range m.players.Players {
+		if player.GetRole() == pb.NodeRole_DEPUTY {
+			deputy = player
+			break
+		}
+	}
+
+	if deputy == nil {
+		log.Printf("No DEPUTY found to transfer MASTER role to!")
+		m.Node.Mu.Unlock()
+		return
+	}
+
+	deputyId := deputy.GetId()
+	deputyAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", deputy.GetIpAddress(), deputy.GetPort()))
+	if err != nil {
+		log.Printf("Error resolving DEPUTY address: %v", err)
+		m.Node.Mu.Unlock()
+		return
+	}
+
+	log.Printf("Transferring MASTER role to DEPUTY (player ID: %d)", deputyId)
+
+	// Обновляем роль DEPUTY на MASTER
+	deputy.Role = pb.NodeRole_MASTER.Enum()
+
+	m.Node.Mu.Unlock()
+
+	// Отправляем RoleChangeMsg новому MASTER
+	roleChangeMsg := &pb.GameMessage{
+		MsgSeq:     proto.Int64(m.Node.MsgSeq),
+		SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
+		ReceiverId: proto.Int32(deputyId),
+		Type: &pb.GameMessage_RoleChange{
+			RoleChange: &pb.GameMessage_RoleChangeMsg{
+				SenderRole:   pb.NodeRole_DEPUTY.Enum(),
+				ReceiverRole: pb.NodeRole_MASTER.Enum(),
+			},
+		},
+	}
+
+	m.Node.SendMessage(roleChangeMsg, deputyAddr)
+	log.Printf("Sent RoleChange to new MASTER (player ID: %d)", deputyId)
+
+	// Останавливаем работу этого MASTER (он теперь наблюдатель)
+	log.Printf("Old MASTER becoming VIEWER observer, stopping master duties but keeping message reception")
+
+	// Устанавливаем новый адрес мастера (теперь это DEPUTY)
+	m.Node.Mu.Lock()
+	m.Node.MasterAddr = deputyAddr
+	// Меняем роль на VIEWER ПЕРЕД закрытием stopChan
+	m.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
+	// Устанавливаем флаг stopped, чтобы управляющие горутины остановились
+	m.stopped = true
+	m.Node.Mu.Unlock()
+
+	// Закрываем stopChan чтобы остановить управляющие горутины
+	// receiveMessages проверит роль и продолжит работать если role == VIEWER
+	close(m.stopChan)
+
+	log.Printf("Old MASTER successfully transitioned to VIEWER mode")
+	log.Printf("Old MASTER (now VIEWER) will continue receiving StateMsg from new MASTER")
 }

@@ -8,6 +8,15 @@ import (
 
 func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 	roleChangeMsg := msg.GetRoleChange()
+
+	// Проверяем - это сообщение для нас (receiverId) или о ком-то другом
+	if msg.GetReceiverId() != 0 && msg.GetReceiverId() != p.Node.PlayerInfo.GetId() {
+		// Это сообщение не для нас, игнорируем
+		log.Printf("Received RoleChange message not for us (receiverId=%d, our ID=%d)",
+			msg.GetReceiverId(), p.Node.PlayerInfo.GetId())
+		return
+	}
+
 	newRole := roleChangeMsg.GetReceiverRole()
 
 	// Обновляем роль игрока
@@ -32,10 +41,12 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 	case pb.NodeRole_DEPUTY:
 		log.Printf("Assigned as DEPUTY")
 	case pb.NodeRole_MASTER:
-		log.Printf("Assigned as MASTER")
-		// TODO: Implement logic to take over as MASTER
+		log.Printf("Received MASTER role! Taking over as MASTER...")
+		// DEPUTY становится MASTER - нужно вызвать becomeMaster
+		go p.becomeMaster()
 	case pb.NodeRole_VIEWER:
-		log.Printf("Now in VIEWER mode - snake is ZOMBIE")
+		log.Printf("Now in VIEWER mode - will continue observing the game")
+		p.IsViewer = true
 	case pb.NodeRole_NORMAL:
 		log.Printf("Assigned as NORMAL player")
 	default:

@@ -245,6 +245,20 @@ func (n *Node) UnconfirmedMessages() int {
 	return len(n.unconfirmedMessages)
 }
 
+// RemoveUnconfirmedMessagesForAddr удаляет все неподтвержденные сообщения для конкретного адреса
+func (n *Node) RemoveUnconfirmedMessagesForAddr(addr *net.UDPAddr) {
+	removed := 0
+	for seq, entry := range n.unconfirmedMessages {
+		if entry.addr.IP.Equal(addr.IP) && entry.addr.Port == addr.Port {
+			delete(n.unconfirmedMessages, seq)
+			removed++
+		}
+	}
+	if removed > 0 {
+		log.Printf("Removed %d unconfirmed messages for address %v", removed, addr)
+	}
+}
+
 // RedirectUnconfirmedMessages переадресует неподтвержденные сообщения с одного адреса на другой
 func (n *Node) RedirectUnconfirmedMessages(oldAddr, newAddr *net.UDPAddr) {
 	for _, entry := range n.unconfirmedMessages {

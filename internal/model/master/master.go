@@ -18,10 +18,12 @@ type Master struct {
 	players                *pb.GamePlayers
 	lastStateMsg           int32
 	crashedPlayersToNotify []*net.UDPAddr // Адреса игроков, которым нужно отправить ErrorMsg после освобождения мьютекса
-
-	stopChan chan struct{}  // канал для остановки горутин Master
-	wg       sync.WaitGroup // для отслеживания завершения горутин
-	stopped  bool           // флаг, что мастер остановлен
+	needNewDeputy          bool           // флаг, что нужно назначить нового DEPUTY после checkCollisions
+	needTransferMaster     bool           // флаг, что MASTER умер и нужно передать роль DEPUTY
+	observerAddrs          []*net.UDPAddr // адреса убитых игроков, которые продолжают наблюдать за игрой
+	stopChan               chan struct{}  // канал для остановки горутин Master
+	wg                     sync.WaitGroup // для отслеживания завершения горутин
+	stopped                bool           // флаг, что мастер остановлен
 }
 
 // NewMaster создает нового мастера
@@ -224,12 +226,28 @@ func (m *Master) handleMulticastMessage(msg *pb.GameMessage, addr *net.UDPAddr) 
 // получение юникаст сообщений
 func (m *Master) receiveMessages() {
 	defer m.wg.Done()
+	becameViewer := false // Флаг что мы уже стали VIEWER и больше не проверяем stopChan
+
 	for {
-		select {
-		case <-m.stopChan:
-			log.Printf("Master receiveMessages stopped")
-			return
-		default:
+		// Проверяем stopChan только если еще не стали VIEWER
+		if !becameViewer {
+			select {
+			case <-m.stopChan:
+				// Проверяем роль - если стали VIEWER, продолжаем получать сообщения
+				m.Node.Mu.Lock()
+				role := m.Node.PlayerInfo.GetRole()
+				m.Node.Mu.Unlock()
+
+				if role == pb.NodeRole_VIEWER {
+					log.Printf("Master receiveMessages: became VIEWER, continuing to receive messages")
+					becameViewer = true // Больше не проверяем stopChan
+					// НЕ останавливаемся, продолжаем получать StateMsg
+				} else {
+					log.Printf("Master receiveMessages stopped")
+					return
+				}
+			default:
+			}
 		}
 
 		// Устанавливаем короткий таймаут для возможности проверки stopChan
@@ -256,6 +274,16 @@ func (m *Master) receiveMessages() {
 			log.Printf("Get msg from itself")
 			continue
 		}
+
+		// Логируем тип полученного сообщения
+		m.Node.Mu.Lock()
+		role := m.Node.PlayerInfo.GetRole()
+		m.Node.Mu.Unlock()
+
+		if role == pb.NodeRole_VIEWER {
+			log.Printf("Master receiveMessages (VIEWER mode): Received message type %T from %v", msg.Type, addr)
+		}
+
 		m.handleMessage(&msg, addr)
 	}
 }
@@ -311,11 +339,33 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		m.Node.AckChan <- msg.GetMsgSeq()
 
 	case *pb.GameMessage_State:
-		if t.State.GetState().GetStateOrder() <= m.lastStateMsg {
+		stateOrder := t.State.GetState().GetStateOrder()
+
+		m.Node.Mu.Lock()
+		currentRole := m.Node.PlayerInfo.GetRole()
+		playerId := m.Node.PlayerInfo.GetId()
+		m.Node.Mu.Unlock()
+
+		log.Printf("Master ID %d (role=%v) received StateMsg stateOrder=%d (lastStateMsg=%d)",
+			playerId, currentRole, stateOrder, m.lastStateMsg)
+
+		if stateOrder <= m.lastStateMsg {
+			log.Printf("Ignoring old StateMsg (stateOrder=%d <= lastStateMsg=%d)", stateOrder, m.lastStateMsg)
 			return
-		} else {
-			m.lastStateMsg = t.State.GetState().GetStateOrder()
 		}
+		m.lastStateMsg = stateOrder
+
+		// Если мы стали VIEWER, обновляем наше состояние из полученного StateMsg
+		m.Node.Mu.Lock()
+		if currentRole == pb.NodeRole_VIEWER {
+			// Обновляем состояние игры чтобы UI мог его отображать
+			m.Node.State = t.State.GetState()
+			log.Printf("Old MASTER (now VIEWER) ID %d: Updated Node.State with %d snakes, %d foods, %d players",
+				playerId, len(m.Node.State.Snakes), len(m.Node.State.Foods), len(m.Node.State.Players.Players))
+			m.Node.Cond.Broadcast() // Уведомляем UI о новом состоянии
+		}
+		m.Node.Mu.Unlock()
+
 		m.Node.SendAck(msg, addr)
 
 	default:
@@ -358,7 +408,7 @@ func (m *Master) sendStateMessage() {
 		foodsCopy := m.Node.State.GetFoods()
 		playersCopy := m.Node.State.GetPlayers()
 
-		// Копируем адреса игроков внутри блока с мьютексом
+		// Копируем адреса всех игроков (включая умерших наблюдателей) внутри блока с мьютексом
 		var allAddrs []*net.UDPAddr
 		for _, player := range m.players.Players {
 			if player.GetId() == m.Node.PlayerInfo.GetId() {
@@ -372,6 +422,8 @@ func (m *Master) sendStateMessage() {
 			}
 			allAddrs = append(allAddrs, addr)
 		}
+
+		// observerAddrs больше не нужен, так как умершие игроки остаются в m.players.Players
 
 		// Копируем адреса упавших игроков для отправки ErrorMsg
 		crashedPlayers := m.crashedPlayersToNotify
@@ -432,4 +484,21 @@ func (m *Master) sendMessageToAllPlayers(msg *pb.GameMessage, addrs []*net.UDPAd
 	for _, addr := range addrs {
 		m.Node.SendMessage(msg, addr)
 	}
+}
+
+// stopMaster останавливает все master-горутины
+func (m *Master) stopMaster() {
+	m.Node.Mu.Lock()
+	if m.stopped {
+		m.Node.Mu.Unlock()
+		log.Printf("Master already stopped")
+		return
+	}
+	m.stopped = true
+	m.Node.Mu.Unlock()
+
+	log.Printf("Stopping Master goroutines...")
+	close(m.stopChan)
+	m.wg.Wait()
+	log.Printf("All Master goroutines stopped successfully")
 }

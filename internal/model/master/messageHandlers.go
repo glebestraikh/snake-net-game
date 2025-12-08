@@ -335,9 +335,82 @@ func (m *Master) checkTimeouts() {
 
 func (m *Master) removePlayer(playerId int32) {
 	m.Node.Mu.Lock()
-	// ВАЖНО: проверяем роль ДО удаления игрока из списка
-	wasDeputy := m.wasPlayerDeputy(playerId)
-	m.removePlayerUnsafe(playerId)
+
+	// Сохраняем информацию о игроке
+	var wasDeputy bool
+
+	for _, player := range m.players.Players {
+		if player.GetId() == playerId {
+			wasDeputy = player.GetRole() == pb.NodeRole_DEPUTY
+			break
+		}
+	}
+
+	// Удаляем змейку игрока, если она есть
+	var snakeIndex = -1
+	for i, snake := range m.Node.State.Snakes {
+		if snake.GetPlayerId() == playerId {
+			snakeIndex = i
+			break
+		}
+	}
+	if snakeIndex >= 0 {
+		m.Node.State.Snakes = append(m.Node.State.Snakes[:snakeIndex], m.Node.State.Snakes[snakeIndex+1:]...)
+		log.Printf("Removed snake for timed out player ID: %d", playerId)
+	}
+
+	// Удаляем из LastInteraction
+	delete(m.Node.LastInteraction, playerId)
+
+	// Проверяем роль игрока и наличие змейки
+	var playerRole pb.NodeRole
+	var playerIndex = -1
+	var hasSnake = false
+
+	for i, player := range m.players.Players {
+		if player.GetId() == playerId {
+			playerRole = player.GetRole()
+			playerIndex = i
+			break
+		}
+	}
+
+	// Проверяем есть ли змейка у игрока
+	for _, snake := range m.Node.State.Snakes {
+		if snake.GetPlayerId() == playerId {
+			hasSnake = true
+			break
+		}
+	}
+
+	// Удаляем игрока из списка если:
+	// 1. Он VIEWER (изначально присоединился как наблюдатель)
+	// 2. Он умер (нет змейки) - DEPUTY, NORMAL без змейки
+	shouldRemove := (playerRole == pb.NodeRole_VIEWER || !hasSnake) && playerIndex >= 0
+
+	if shouldRemove {
+		// Получаем адрес игрока для удаления из LastSent
+		disconnectedPlayer := m.players.Players[playerIndex]
+		addrKey := fmt.Sprintf("%s:%d", disconnectedPlayer.GetIpAddress(), disconnectedPlayer.GetPort())
+		playerAddr, err := net.ResolveUDPAddr("udp", addrKey)
+
+		m.players.Players = append(m.players.Players[:playerIndex], m.players.Players[playerIndex+1:]...)
+		m.Node.State.Players = m.players
+
+		// Удаляем из LastSent чтобы прекратить отправку новых Ping
+		delete(m.Node.LastSent, addrKey)
+
+		// Удаляем все неподтвержденные сообщения для этого адреса
+		if err == nil {
+			m.Node.RemoveUnconfirmedMessagesForAddr(playerAddr)
+		}
+
+		log.Printf("Player ID: %d (role=%v, hasSnake=%v) has timed out and been removed from game list (addr=%s)",
+			playerId, playerRole, hasSnake, addrKey)
+	} else {
+		log.Printf("Player ID: %d has timed out but remains in game list (has active snake)", playerId)
+	}
+
 	m.Node.Mu.Unlock()
 
 	// Если игрок был DEPUTY, назначаем нового (БЕЗ мьютекса, так как внутри SendMessage)
@@ -348,6 +421,8 @@ func (m *Master) removePlayer(playerId int32) {
 }
 
 // removePlayerUnsafe удаляет игрока БЕЗ захвата мьютекса (для использования когда мьютекс уже захвачен)
+// DEPRECATED: Этот метод больше не используется, так как игроки больше не удаляются из списка
+// Оставлен для обратной совместимости, но может быть удален в будущем
 func (m *Master) removePlayerUnsafe(playerId int32) {
 	delete(m.Node.LastInteraction, playerId)
 
@@ -466,10 +541,12 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 
 	switch {
 	case roleChangeMsg.GetSenderRole() == pb.NodeRole_DEPUTY && roleChangeMsg.GetReceiverRole() == pb.NodeRole_MASTER:
-		// TODO: доделать
-		// DEPUTY -> MASTER
-		log.Printf("Deputy has taken over as MASTER. Stopping PlayerInfo.")
-		m.stopMaster()
+		// Это сообщение отправляет старый MASTER новому MASTER (который был DEPUTY)
+		// Но новый MASTER уже стал MASTER через becomeMaster() на стороне Player
+		// Это сообщение получает старый MASTER (который еще не остановился)
+		// Поэтому просто игнорируем его - старый MASTER остановится через transferMasterToDeputy()
+		log.Printf("Received MASTER transfer notification, ignoring (already handled)")
+		return
 
 	case roleChangeMsg.GetSenderRole() == pb.NodeRole_NORMAL && roleChangeMsg.GetReceiverRole() == pb.NodeRole_VIEWER:
 		// NORMAL Player -> VIEWER
@@ -480,7 +557,9 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 
 		// Проверяем был ли игрок DEPUTY - если да, то нужно найти нового
 		wasDeputy := false
-		var playerAddr *net.UDPAddr
+		var playerIP string
+		var playerPort int32
+
 		for _, player := range m.players.Players {
 			if player.GetId() == playerId {
 				if player.GetRole() == pb.NodeRole_DEPUTY {
@@ -488,7 +567,8 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 				}
 				player.Role = pb.NodeRole_VIEWER.Enum()
 				// Сохраняем адрес игрока для отправки подтверждения
-				playerAddr, _ = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort()))
+				playerIP = player.GetIpAddress()
+				playerPort = player.GetPort()
 				break
 			}
 		}
@@ -501,20 +581,23 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 		m.Node.Mu.Unlock()
 
 		// Отправляем подтверждение игроку о смене роли
-		if playerAddr != nil {
-			confirmRoleChangeMsg := &pb.GameMessage{
-				MsgSeq:     proto.Int64(m.Node.MsgSeq),
-				SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
-				ReceiverId: proto.Int32(playerId),
-				Type: &pb.GameMessage_RoleChange{
-					RoleChange: &pb.GameMessage_RoleChangeMsg{
-						SenderRole:   pb.NodeRole_MASTER.Enum(),
-						ReceiverRole: pb.NodeRole_VIEWER.Enum(),
+		if playerIP != "" {
+			playerAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", playerIP, playerPort))
+			if err == nil {
+				confirmRoleChangeMsg := &pb.GameMessage{
+					MsgSeq:     proto.Int64(m.Node.MsgSeq),
+					SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
+					ReceiverId: proto.Int32(playerId),
+					Type: &pb.GameMessage_RoleChange{
+						RoleChange: &pb.GameMessage_RoleChangeMsg{
+							SenderRole:   pb.NodeRole_MASTER.Enum(),
+							ReceiverRole: pb.NodeRole_VIEWER.Enum(),
+						},
 					},
-				},
+				}
+				m.Node.SendMessage(confirmRoleChangeMsg, playerAddr)
+				log.Printf("Sent RoleChange confirmation to player ID: %d", playerId)
 			}
-			m.Node.SendMessage(confirmRoleChangeMsg, playerAddr)
-			log.Printf("Sent RoleChange confirmation to player ID: %d", playerId)
 		}
 
 		if gameEnding {
@@ -533,38 +616,6 @@ func (m *Master) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 		log.Printf("Received unknown RoleChangeMsg from player ID: %d (SenderRole: %v, ReceiverRole: %v)",
 			msg.GetSenderId(), roleChangeMsg.GetSenderRole(), roleChangeMsg.GetReceiverRole())
 	}
-}
-
-func (m *Master) stopMaster() {
-	log.Println("Stopping Master goroutines...")
-
-	// Устанавливаем флаг остановки
-	m.Node.Mu.Lock()
-	if m.stopped {
-		m.Node.Mu.Unlock()
-		log.Println("Master already stopped")
-		return
-	}
-	m.stopped = true
-	m.Node.Mu.Unlock()
-
-	// Закрываем канал остановки - это остановит все горутины мастера
-	close(m.stopChan)
-
-	// Меняем роль мастера на VIEWER
-	m.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
-
-	// Делаем змею мастера ZOMBIE
-	m.Node.Mu.Lock()
-	m.makeSnakeZombie(m.Node.PlayerInfo.GetId())
-	m.Node.Mu.Unlock()
-
-	m.announcement.CanJoin = proto.Bool(false)
-
-	// Останавливаем горутины Node (resend, ping)
-	m.Node.StopNodeGoroutines()
-
-	log.Println("Master stopped. Now a VIEWER/observer.")
 }
 
 // checkGameEnd проверяет, остались ли активные игроки (вызывать с захваченным мьютексом)
