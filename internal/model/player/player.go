@@ -28,8 +28,9 @@ type Player struct {
 	MasterAddr      *net.UDPAddr
 	LastStateMsg    int32
 
-	haveId   bool
-	IsViewer bool // true если игрок присоединяется как наблюдатель
+	haveId          bool
+	joinRequestSent bool // флаг, что JoinRequest уже отправлен
+	IsViewer        bool // true если игрок присоединяется как наблюдатель
 
 	DiscoveredGames []DiscoveredGame
 
@@ -73,7 +74,8 @@ func NewPlayer(multicastConn *net.UDPConn) *Player {
 		MasterAddr:      nil,
 		LastStateMsg:    0,
 
-		haveId: false,
+		haveId:          false,
+		joinRequestSent: false,
 
 		DiscoveredGames: []DiscoveredGame{},
 		stopChan:        make(chan struct{}),
@@ -147,8 +149,15 @@ func (p *Player) handleMulticastMessage(msg *pb.GameMessage, addr *net.UDPAddr) 
 }
 
 func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.UDPAddr, announcementMsg *pb.GameMessage_AnnouncementMsg) {
-	for _, game := range p.DiscoveredGames {
-		if game.GameName == announcement.GetGameName() {
+	// Проверяем, есть ли уже игра от этого мастера (по адресу)
+	for i, game := range p.DiscoveredGames {
+		if game.MasterAddr.String() == addr.String() {
+			// Обновляем информацию об игре от этого мастера
+			p.DiscoveredGames[i].Players = announcement.GetPlayers()
+			p.DiscoveredGames[i].Config = announcement.GetConfig()
+			p.DiscoveredGames[i].CanJoin = announcement.GetCanJoin()
+			p.DiscoveredGames[i].GameName = announcement.GetGameName()
+			p.DiscoveredGames[i].AnnouncementMsg = announcementMsg
 			return
 		}
 	}
@@ -163,7 +172,7 @@ func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.
 	}
 
 	p.DiscoveredGames = append(p.DiscoveredGames, newGame)
-	log.Printf("Discovered new game: '%s'", announcement.GetGameName())
+	log.Printf("Discovered new game: '%s' from %s", announcement.GetGameName(), addr.String())
 }
 
 func (p *Player) receiveMessagesLoop() {
@@ -232,9 +241,17 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 			p.Node.Config = t.Announcement.Games[0].GetConfig()
 			log.Printf("Set Config from AnnouncementMsg: stateDelayMs=%d", p.Node.Config.GetStateDelayMs())
 		}
+
+		// Отправляем JoinRequest только если ещё не отправляли
+		alreadySent := p.joinRequestSent
 		p.Node.Mu.Unlock()
-		log.Printf("Received AnnouncementMsg from %v via unicast", addr)
-		p.sendJoinRequest()
+
+		if !alreadySent {
+			log.Printf("Received AnnouncementMsg from %v via unicast, sending JoinRequest", addr)
+			p.sendJoinRequest()
+		} else {
+			log.Printf("Received AnnouncementMsg from %v via unicast, but JoinRequest already sent", addr)
+		}
 		return
 	case *pb.GameMessage_State:
 		stateOrder := t.State.GetState().GetStateOrder()
@@ -347,6 +364,12 @@ func (p *Player) sendJoinRequest() {
 	}
 
 	p.Node.SendMessage(joinMsg, p.MasterAddr)
+
+	// Устанавливаем флаг, что JoinRequest отправлен
+	p.Node.Mu.Lock()
+	p.joinRequestSent = true
+	p.Node.Mu.Unlock()
+
 	log.Printf("Player: Sent JoinMsg to master at %v (role: %v)", p.MasterAddr, requestedRole)
 }
 

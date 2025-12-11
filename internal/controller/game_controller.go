@@ -28,8 +28,8 @@ func NewGameController(window fyne.Window, multConn *net.UDPConn) *GameControlle
 }
 
 // StartNewGame начинает новую игру как мастер
-func (gc *GameController) StartNewGame(config *pb.GameConfig) *master.Master {
-	masterNode := master.NewMaster(gc.multConn, config)
+func (gc *GameController) StartNewGame(config *pb.GameConfig, gameName string) *master.Master {
+	masterNode := master.NewMaster(gc.multConn, config, gameName)
 	go masterNode.Start()
 	return masterNode
 }

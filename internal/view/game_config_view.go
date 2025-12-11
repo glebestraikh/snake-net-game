@@ -40,6 +40,10 @@ func (gcv *GameConfigView) Show() {
 	subtitle.Alignment = fyne.TextAlignCenter
 
 	// Поля ввода с предустановленными значениями
+	gameNameEntry := widget.NewEntry()
+	gameNameEntry.SetText("Моя игра")
+	gameNameEntry.SetPlaceHolder("Введите название игры")
+
 	widthEntry := widget.NewEntry()
 	widthEntry.SetText("25")
 	widthEntry.SetPlaceHolder("10-100")
@@ -57,10 +61,14 @@ func (gcv *GameConfigView) Show() {
 	delayEntry.SetPlaceHolder("100-3000")
 
 	// Создаем стилизованную форму
-	formCard := gcv.createFormCard(widthEntry, heightEntry, foodEntry, delayEntry)
+	formCard := gcv.createFormCard(gameNameEntry, widthEntry, heightEntry, foodEntry, delayEntry)
 
 	// Кнопки
 	startButton := widget.NewButton("🎮 Начать игру", func() {
+		gameName := gameNameEntry.Text
+		if gameName == "" {
+			gameName = "Игра без названия"
+		}
 		width, _ := strconv.Atoi(widthEntry.Text)
 		height, _ := strconv.Atoi(heightEntry.Text)
 		food, _ := strconv.Atoi(foodEntry.Text)
@@ -73,7 +81,7 @@ func (gcv *GameConfigView) Show() {
 			StateDelayMs: proto.Int32(int32(delay)),
 		}
 
-		masterView := NewMasterGameView(gcv.window, gcv.controller, config)
+		masterView := NewMasterGameView(gcv.window, gcv.controller, config, gameName)
 		masterView.Show()
 	})
 	startButton.Importance = widget.HighImportance
@@ -104,11 +112,21 @@ func (gcv *GameConfigView) Show() {
 }
 
 // createFormCard создает карточку с полями формы
-func (gcv *GameConfigView) createFormCard(widthEntry, heightEntry, foodEntry, delayEntry *widget.Entry) *fyne.Container {
+func (gcv *GameConfigView) createFormCard(gameNameEntry, widthEntry, heightEntry, foodEntry, delayEntry *widget.Entry) *fyne.Container {
 	cardBg := canvas.NewRectangle(CardBackground)
 	cardBg.CornerRadius = 10
 
 	formItems := container.NewVBox()
+
+	// Название игры
+	gameNameLabel := canvas.NewText("Название игры", color.White)
+	gameNameLabel.TextStyle = fyne.TextStyle{Bold: true}
+	gameNameDesc := widget.NewLabel("Название вашей игры для отображения в списке")
+	gameNameDesc.TextStyle = fyne.TextStyle{Italic: true}
+	formItems.Add(gameNameLabel)
+	formItems.Add(gameNameEntry)
+	formItems.Add(gameNameDesc)
+	formItems.Add(widget.NewSeparator())
 
 	// Ширина поля
 	widthLabel := canvas.NewText("Ширина поля", color.White)

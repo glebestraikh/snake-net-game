@@ -27,7 +27,7 @@ type Master struct {
 }
 
 // NewMaster создает нового мастера
-func NewMaster(multicastConn *net.UDPConn, config *pb.GameConfig) *Master {
+func NewMaster(multicastConn *net.UDPConn, config *pb.GameConfig, gameName string) *Master {
 	localAddr, err := net.ResolveUDPAddr("udp4", ":0")
 	if err != nil {
 		log.Fatalf("Error resolving local UDP address: %v", err)
@@ -94,7 +94,7 @@ func NewMaster(multicastConn *net.UDPConn, config *pb.GameConfig) *Master {
 		Players:  players,
 		Config:   config,
 		CanJoin:  proto.Bool(true),
-		GameName: proto.String("Game1"),
+		GameName: proto.String(gameName),
 	}
 
 	node := common.NewNode(state, config, multicastConn, unicastConn, masterPlayer)

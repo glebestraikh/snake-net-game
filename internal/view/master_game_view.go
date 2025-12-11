@@ -17,6 +17,7 @@ type MasterGameView struct {
 	window     fyne.Window
 	controller *controller.GameController
 	config     *pb.GameConfig
+	gameName   string
 	renderer   *GameRenderer
 	infoPanel  *InfoPanel
 	scoreLabel *widget.Label
@@ -25,18 +26,19 @@ type MasterGameView struct {
 }
 
 // NewMasterGameView создает новое представление игры мастера
-func NewMasterGameView(window fyne.Window, controller *controller.GameController, config *pb.GameConfig) *MasterGameView {
+func NewMasterGameView(window fyne.Window, controller *controller.GameController, config *pb.GameConfig, gameName string) *MasterGameView {
 	return &MasterGameView{
 		window:     window,
 		controller: controller,
 		config:     config,
+		gameName:   gameName,
 		renderer:   NewGameRenderer(),
 	}
 }
 
 // Show отображает экран игры мастера
 func (mgv *MasterGameView) Show() {
-	masterNode := mgv.controller.StartNewGame(mgv.config)
+	masterNode := mgv.controller.StartNewGame(mgv.config, mgv.gameName)
 
 	gameContent := mgv.renderer.CreateGameContent(mgv.config)
 
