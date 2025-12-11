@@ -405,6 +405,20 @@ func (m *Master) removePlayer(playerId int32) {
 			m.Node.RemoveUnconfirmedMessagesForAddr(playerAddr)
 		}
 
+		// Удаляем адрес из observerAddrs, если он там есть
+		if err == nil {
+			var updatedObservers []*net.UDPAddr
+			for _, observerAddr := range m.observerAddrs {
+				if observerAddr.String() != playerAddr.String() {
+					updatedObservers = append(updatedObservers, observerAddr)
+				}
+			}
+			if len(updatedObservers) != len(m.observerAddrs) {
+				m.observerAddrs = updatedObservers
+				log.Printf("Removed observer address %s from observerAddrs", playerAddr.String())
+			}
+		}
+
 		log.Printf("Player ID: %d (role=%v, hasSnake=%v) has timed out and been removed from game list (addr=%s)",
 			playerId, playerRole, hasSnake, addrKey)
 	} else {

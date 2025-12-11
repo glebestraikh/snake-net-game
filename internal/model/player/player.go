@@ -28,9 +28,10 @@ type Player struct {
 	MasterAddr      *net.UDPAddr
 	LastStateMsg    int32
 
-	haveId          bool
-	joinRequestSent bool // флаг, что JoinRequest уже отправлен
-	IsViewer        bool // true если игрок присоединяется как наблюдатель
+	haveId                bool
+	joinRequestSent       bool // флаг, что JoinRequest уже отправлен
+	nodeGoroutinesStarted bool // флаг, что горутины Node уже запущены
+	IsViewer              bool // true если игрок присоединяется как наблюдатель
 
 	DiscoveredGames []DiscoveredGame
 
@@ -74,8 +75,9 @@ func NewPlayer(multicastConn *net.UDPConn) *Player {
 		MasterAddr:      nil,
 		LastStateMsg:    0,
 
-		haveId:          false,
-		joinRequestSent: false,
+		haveId:                false,
+		joinRequestSent:       false,
+		nodeGoroutinesStarted: false,
 
 		DiscoveredGames: []DiscoveredGame{},
 		stopChan:        make(chan struct{}),
@@ -87,8 +89,19 @@ func (p *Player) Start() {
 	p.wg.Add(2) // Для receiveMessages и checkTimeouts
 	go p.receiveMessagesLoop()
 	go p.checkTimeoutsLoop()
-	p.Node.StartResendUnconfirmedMessages(p.Node.Config.GetStateDelayMs())
-	p.Node.StartSendPings(p.Node.Config.GetStateDelayMs())
+
+	// Запускаем горутины Node только если Config уже установлен
+	p.Node.Mu.Lock()
+	if p.Node.Config != nil && !p.nodeGoroutinesStarted {
+		p.nodeGoroutinesStarted = true
+		p.Node.Mu.Unlock()
+		p.Node.StartResendUnconfirmedMessages(p.Node.Config.GetStateDelayMs())
+		p.Node.StartSendPings(p.Node.Config.GetStateDelayMs())
+		log.Printf("Started Node goroutines with stateDelayMs=%d", p.Node.Config.GetStateDelayMs())
+	} else {
+		p.Node.Mu.Unlock()
+		log.Printf("Config is nil, will start Node goroutines after receiving Config")
+	}
 }
 
 func (p *Player) ReceiveMulticastMessages() {
@@ -233,13 +246,32 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		p.Node.Mu.Unlock()
 		return
 	case *pb.GameMessage_Announcement:
+		// Проверяем - это AnnouncementMsg от нашего мастера или от другой игры
+		// Если мы уже выбрали мастера (MasterAddr установлен), игнорируем сообщения от других
+		if p.MasterAddr != nil && p.MasterAddr.String() != addr.String() {
+			log.Printf("Received AnnouncementMsg from %v, but our master is %v - ignoring", addr, p.MasterAddr)
+			p.Node.Mu.Unlock()
+			return
+		}
+
 		p.MasterAddr = addr
 		p.Node.MasterAddr = addr
 		p.AnnouncementMsg = t.Announcement
 		// Устанавливаем Config из AnnouncementMsg
 		if len(t.Announcement.Games) > 0 {
+			configWasNil := p.Node.Config == nil
 			p.Node.Config = t.Announcement.Games[0].GetConfig()
 			log.Printf("Set Config from AnnouncementMsg: stateDelayMs=%d", p.Node.Config.GetStateDelayMs())
+
+			// Если Config был nil И горутины еще не запущены, запускаем их сейчас
+			if configWasNil && !p.nodeGoroutinesStarted {
+				p.nodeGoroutinesStarted = true
+				p.Node.Mu.Unlock()
+				p.Node.StartResendUnconfirmedMessages(p.Node.Config.GetStateDelayMs())
+				p.Node.StartSendPings(p.Node.Config.GetStateDelayMs())
+				log.Printf("Started Node goroutines after receiving Config")
+				p.Node.Mu.Lock()
+			}
 		}
 
 		// Отправляем JoinRequest только если ещё не отправляли
@@ -377,6 +409,26 @@ func (p *Player) sendJoinRequest() {
 func (p *Player) checkTimeoutsLoop() {
 	// НЕ используем defer p.wg.Done() здесь, потому что при вызове becomeMaster()
 	// мы вызываем wg.Done() вручную ДО becomeMaster(), чтобы избежать deadlock
+
+	// Ждем пока Config будет установлен
+	for {
+		p.Node.Mu.Lock()
+		if p.Node.Config != nil {
+			p.Node.Mu.Unlock()
+			break
+		}
+		p.Node.Mu.Unlock()
+
+		// Проверяем stopChan перед ожиданием
+		select {
+		case <-p.stopChan:
+			log.Printf("Player checkTimeouts stopped before Config was set")
+			p.wg.Done()
+			return
+		case <-time.After(100 * time.Millisecond):
+			// Ждем и проверяем снова
+		}
+	}
 
 	ticker := time.NewTicker(time.Duration(0.8*float64(p.Node.Config.GetStateDelayMs())) * time.Millisecond)
 	defer ticker.Stop()

@@ -13,8 +13,10 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 		p.Node.PlayerInfo.GetId(), msg.GetSenderId(), msg.GetReceiverId(),
 		roleChangeMsg.GetSenderRole(), roleChangeMsg.GetReceiverRole())
 
-	// Проверяем - это сообщение для нас (receiverId) или о ком-то другом
-	if msg.GetReceiverId() != 0 && msg.GetReceiverId() != p.Node.PlayerInfo.GetId() {
+	// Проверяем - это сообщение для нас
+	// Если наш ID еще 0 (не установлен), пропускаем проверку - обработаем позже
+	// Если ID установлен, проверяем совпадение
+	if p.Node.PlayerInfo.GetId() != 0 && msg.GetReceiverId() != 0 && msg.GetReceiverId() != p.Node.PlayerInfo.GetId() {
 		// Это сообщение не для нас, игнорируем
 		log.Printf("Player ID %d: Ignoring RoleChange not for us (receiverId=%d, our ID=%d)",
 			p.Node.PlayerInfo.GetId(), msg.GetReceiverId(), p.Node.PlayerInfo.GetId())
