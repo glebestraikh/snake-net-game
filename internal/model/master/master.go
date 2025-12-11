@@ -110,12 +110,12 @@ func NewMaster(multicastConn *net.UDPConn, config *pb.GameConfig, gameName strin
 }
 
 // NewMasterFromPlayer создает мастера из существующего игрока (когда DEPUTY становится MASTER)
-func NewMasterFromPlayer(node *common.Node, players *pb.GamePlayers, lastStateMsg int32) *Master {
+func NewMasterFromPlayer(node *common.Node, players *pb.GamePlayers, lastStateMsg int32, gameName string) *Master {
 	announcement := &pb.GameAnnouncement{
 		Players:  players,
 		Config:   node.Config,
 		CanJoin:  proto.Bool(true),
-		GameName: proto.String("Game1"),
+		GameName: proto.String(gameName),
 	}
 
 	return &Master{
@@ -153,6 +153,15 @@ func (m *Master) sendAnnouncementMessage() {
 			log.Printf("Master sendAnnouncementMessage stopped")
 			return
 		case <-ticker.C:
+			// Проверяем флаг stopped перед отправкой
+			m.Node.Mu.Lock()
+			if m.stopped {
+				m.Node.Mu.Unlock()
+				log.Printf("Master sendAnnouncementMessage stopped (stopped flag)")
+				return
+			}
+			m.Node.Mu.Unlock()
+
 			announcementMsg := &pb.GameMessage{
 				MsgSeq: proto.Int64(1),
 				Type: &pb.GameMessage_Announcement{

@@ -697,19 +697,28 @@ func (p *Player) becomeMaster() {
 		log.Printf("Snake for player %d: state=%v", snake.GetPlayerId(), snake.GetState())
 	}
 
-	// Очищаем LastInteraction от старого мастера
+	// Удаляем старого MASTER из LastInteraction (если он был)
 	if oldMasterId != -1 {
 		delete(p.Node.LastInteraction, oldMasterId)
 		log.Printf("Removed old MASTER (ID: %d) from LastInteraction", oldMasterId)
+
+		// Инициализируем LastInteraction для старого MASTER-VIEWER с текущим временем
+		// чтобы работала проверка таймаута
+		p.Node.LastInteraction[oldMasterId] = time.Now()
+		log.Printf("Initialized LastInteraction for old MASTER-VIEWER (ID: %d)", oldMasterId)
 	}
 
-	// Полностью очищаем LastInteraction - начинаем с чистого листа как Master
-	p.Node.LastInteraction = make(map[int32]time.Time)
-	log.Printf("Cleared LastInteraction map")
+	// Удаляем старого мастера из LastSent, если его адрес там есть
+	if oldMasterId != -1 && p.MasterAddr != nil {
+		oldMasterKey := p.MasterAddr.String()
+		delete(p.Node.LastSent, oldMasterKey)
+		log.Printf("Removed old MASTER address %s from LastSent", oldMasterKey)
+	}
 
-	// Очищаем LastSent - больше не нужно отправлять сообщения старому мастеру
-	p.Node.LastSent = make(map[string]time.Time)
-	log.Printf("Cleared LastSent map")
+	// НЕ очищаем полностью LastInteraction и LastSent!
+	// Они содержат информацию об остальных игроках, которая нужна для корректной работы
+	log.Printf("Kept existing LastInteraction entries for %d players", len(p.Node.LastInteraction))
+	log.Printf("Kept existing LastSent entries for %d addresses", len(p.Node.LastSent))
 
 	// Очищаем MasterAddr - мы теперь сами мастер
 	p.Node.MasterAddr = nil
@@ -720,8 +729,15 @@ func (p *Player) becomeMaster() {
 	p.Node.ResetStopChan()
 	p.Node.AckChan = make(chan int64, 100)
 
+	// Извлекаем название игры из AnnouncementMsg
+	gameName := "Game1" // дефолтное значение
+	if p.AnnouncementMsg != nil && len(p.AnnouncementMsg.Games) > 0 {
+		gameName = p.AnnouncementMsg.Games[0].GetGameName()
+		log.Printf("Preserving original game name: '%s'", gameName)
+	}
+
 	// Создаем структуру Master из текущего Player
-	newMaster := master.NewMasterFromPlayer(p.Node, p.Node.State.Players, p.LastStateMsg)
+	newMaster := master.NewMasterFromPlayer(p.Node, p.Node.State.Players, p.LastStateMsg, gameName)
 	p.Node.Mu.Unlock()
 
 	log.Printf("Player %d is now MASTER, starting master functions", p.Node.PlayerInfo.GetId())
