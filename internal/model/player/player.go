@@ -664,7 +664,10 @@ func (p *Player) becomeMaster() {
 			// НЕ удаляем старого MASTER! Меняем его роль на VIEWER
 			// чтобы он продолжал получать StateMsg и видеть игру
 			player.Role = pb.NodeRole_VIEWER.Enum()
-			log.Printf("Changed old MASTER (player ID: %d) role to VIEWER in game state", oldMasterId)
+			// Инициализируем LastInteraction для старого MASTER-VIEWER
+			// чтобы работала проверка таймаута, если он отключится
+			p.Node.LastInteraction[oldMasterId] = time.Now()
+			log.Printf("Changed old MASTER (player ID: %d) role to VIEWER in game state and initialized LastInteraction", oldMasterId)
 		}
 		if player.GetId() == p.Node.PlayerInfo.GetId() {
 			player.Role = pb.NodeRole_MASTER.Enum()
