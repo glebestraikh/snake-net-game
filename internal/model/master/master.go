@@ -302,6 +302,10 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 	if msg.GetSenderId() > 0 {
 		m.Node.Mu.Lock()
 		m.Node.LastInteraction[msg.GetSenderId()] = time.Now()
+		// remember sender address for later (fallback if GamePlayer lacks ip/port)
+		if addr != nil {
+			m.Node.KnownAddrs[msg.GetSenderId()] = addr
+		}
 		m.Node.Mu.Unlock()
 	}
 	switch t := msg.Type.(type) {
@@ -423,13 +427,19 @@ func (m *Master) sendStateMessage() {
 			if player.GetId() == m.Node.PlayerInfo.GetId() {
 				continue
 			}
-			addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
-			addr, err := net.ResolveUDPAddr("udp", addrStr)
-			if err != nil {
-				log.Printf("Error resolving UDP address for player ID %d: %v", player.GetId(), err)
-				continue
+			// prefer address from player record
+			if player.GetIpAddress() != "" && player.GetPort() != 0 {
+				addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
+				addr, err := net.ResolveUDPAddr("udp", addrStr)
+				if err == nil {
+					allAddrs = append(allAddrs, addr)
+					continue
+				}
 			}
-			allAddrs = append(allAddrs, addr)
+			// fallback to KnownAddrs map (last-seen UDP addr)
+			if known, ok := m.Node.KnownAddrs[player.GetId()]; ok && known != nil {
+				allAddrs = append(allAddrs, known)
+			}
 		}
 
 		// observerAddrs больше не нужен, так как умершие игроки остаются в m.players.Players
@@ -452,20 +462,128 @@ func (m *Master) sendStateMessage() {
 			m.Node.SendMessage(errorMsg, crashedAddr)
 		}
 
+		// Build compressed copy of snakes for sending without mutating master state
+		var msgSnakes []*pb.GameState_Snake
+		for _, snake := range snakesCopy {
+			compressed := compressSnakePoints(snake, m.Node.Config.GetWidth(), m.Node.Config.GetHeight())
+			msgSnakes = append(msgSnakes, compressed)
+		}
+
 		stateMsg := &pb.GameMessage{
 			MsgSeq: proto.Int64(m.Node.MsgSeq),
 			Type: &pb.GameMessage_State{
 				State: &pb.GameMessage_StateMsg{
 					State: &pb.GameState{
 						StateOrder: proto.Int32(newStateOrder),
-						Snakes:     snakesCopy,
+						Snakes:     msgSnakes,
 						Foods:      foodsCopy,
 						Players:    playersCopy,
 					},
 				},
 			},
 		}
+
+		// Debug: log and send to all players
+		log.Printf("Sending StateMsg stateOrder=%d to %d addrs", newStateOrder, len(allAddrs))
 		m.sendMessageToAllPlayers(stateMsg, allAddrs)
+	}
+}
+
+// compressSnakePoints converts a snake represented as a list of absolute coordinates
+// (head first, then subsequent body cells) into the protobuf "key points" format:
+// first point is absolute head coordinate, each next point is a displacement (either x or y)
+// relative to the previous key point. This matches Kotlin client's expectations.
+func compressSnakePoints(s *pb.GameState_Snake, width, height int32) *pb.GameState_Snake {
+	if s == nil || len(s.GetPoints()) == 0 {
+		return s
+	}
+	pts := s.GetPoints()
+	// copy head as absolute
+	head := pts[0]
+	newPoints := []*pb.GameState_Coord{{X: proto.Int32(head.GetX()), Y: proto.Int32(head.GetY())}}
+	if len(pts) == 1 {
+		// only head
+		return &pb.GameState_Snake{
+			PlayerId:      proto.Int32(s.GetPlayerId()),
+			Points:        newPoints,
+			State:         s.State,
+			HeadDirection: s.HeadDirection,
+		}
+	}
+
+	// helper to compute wrapped delta between prev and cur
+	wrapDelta := func(prev, cur *pb.GameState_Coord) (int32, int32) {
+		dx := cur.GetX() - prev.GetX()
+		dy := cur.GetY() - prev.GetY()
+		// normalize with torus (choose minimal displacement)
+		if dx > width/2 {
+			dx -= width
+		} else if dx < -width/2 {
+			dx += width
+		}
+		if dy > height/2 {
+			dy -= height
+		} else if dy < -height/2 {
+			dy += height
+		}
+		return dx, dy
+	}
+
+	// accumulate runs of same axis
+	prev := pts[0]
+	var accum int32 = 0
+	var axisIsX *bool = nil // nil = not initialized; true=x, false=y
+
+	for i := 1; i < len(pts); i++ {
+		cur := pts[i]
+		dx, dy := wrapDelta(prev, cur)
+		// determine this step's axis and value
+		var stepIsX bool
+		var val int32
+		if dx != 0 {
+			stepIsX = true
+			val = dx
+		} else {
+			stepIsX = false
+			val = dy
+		}
+
+		if axisIsX == nil {
+			// start new run
+			b := stepIsX
+			axisIsX = &b
+			accum = val
+		} else if *axisIsX == stepIsX {
+			// same axis, accumulate
+			accum += val
+		} else {
+			// axis changed — flush previous run
+			if *axisIsX {
+				newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(accum), Y: proto.Int32(0)})
+			} else {
+				newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(0), Y: proto.Int32(accum)})
+			}
+			// start new run
+			b := stepIsX
+			axisIsX = &b
+			accum = val
+		}
+		prev = cur
+	}
+	// flush final run
+	if axisIsX != nil {
+		if *axisIsX {
+			newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(accum), Y: proto.Int32(0)})
+		} else {
+			newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(0), Y: proto.Int32(accum)})
+		}
+	}
+
+	return &pb.GameState_Snake{
+		PlayerId:      proto.Int32(s.GetPlayerId()),
+		Points:        newPoints,
+		State:         s.State,
+		HeadDirection: s.HeadDirection,
 	}
 }
 
@@ -477,13 +595,19 @@ func (m *Master) getAllPlayersUDPAddrs() []*net.UDPAddr {
 		if player.GetId() == m.Node.PlayerInfo.GetId() {
 			continue
 		}
-		addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
-		addr, err := net.ResolveUDPAddr("udp", addrStr)
-		if err != nil {
-			log.Printf("Error resolving UDP address for player ID %d: %v", player.GetId(), err)
-			continue
+		// prefer explicit player address
+		if player.GetIpAddress() != "" && player.GetPort() != 0 {
+			addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
+			addr, err := net.ResolveUDPAddr("udp", addrStr)
+			if err == nil {
+				addrs = append(addrs, addr)
+				continue
+			}
 		}
-		addrs = append(addrs, addr)
+		// fallback to known last-seen address
+		if known, ok := m.Node.KnownAddrs[player.GetId()]; ok && known != nil {
+			addrs = append(addrs, known)
+		}
 	}
 	return addrs
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"fyne.io/fyne/v2"
 	"google.golang.org/protobuf/proto"
+	"log"
 	"net"
 	"snake-net-game/internal/model/common"
 	"snake-net-game/internal/model/master"
@@ -45,6 +46,13 @@ func (gc *GameController) JoinGame(playerNode *player.Player, playerName string,
 	// Устанавливаем роль сразу, если присоединяемся как VIEWER
 	if isViewer {
 		playerNode.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
+	}
+
+	// Debug log to help diagnose join issues
+	if playerNode.MasterAddr != nil {
+		log.Printf("JoinGame: master addr set to %s, announcement present=%v", playerNode.MasterAddr.String(), playerNode.AnnouncementMsg != nil)
+	} else {
+		log.Printf("JoinGame: master addr is nil, announcement present=%v", playerNode.AnnouncementMsg != nil)
 	}
 
 	playerNode.Start()

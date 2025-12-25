@@ -93,6 +93,12 @@ func (m *Master) handleJoinMessage(msgSeq int64, joinMsg *pb.GameMessage_JoinMsg
 	}
 	m.Node.Mu.Unlock()
 
+	// Compress snake points into key-points format expected by Kotlin UI
+	for _, snake := range stateMsg.GetType().(*pb.GameMessage_State).State.GetState().GetSnakes() {
+		compressed := compressSnakePoints(snake, m.Node.Config.GetWidth(), m.Node.Config.GetHeight())
+		snake.Points = compressed.GetPoints()
+	}
+
 	m.Node.SendMessage(stateMsg, addr)
 
 	log.Printf("New player joined, ID: %v, sent initial state", newPlayer)

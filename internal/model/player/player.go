@@ -102,6 +102,18 @@ func (p *Player) Start() {
 		p.Node.Mu.Unlock()
 		log.Printf("Config is nil, will start Node goroutines after receiving Config")
 	}
+
+	// Если контроллер уже установил AnnouncementMsg и MasterAddr до вызова Start (например, при JoinGame),
+	// отправляем JoinRequest сразу.
+	p.Node.Mu.Lock()
+	alreadyHaveAnnouncement := p.AnnouncementMsg != nil && p.MasterAddr != nil
+	alreadySent := p.joinRequestSent
+	p.Node.Mu.Unlock()
+
+	if alreadyHaveAnnouncement && !alreadySent {
+		log.Printf("Announcement already provided before Start; sending JoinRequest immediately")
+		p.sendJoinRequest()
+	}
 }
 
 func (p *Player) ReceiveMulticastMessages() {
@@ -163,14 +175,31 @@ func (p *Player) handleMulticastMessage(msg *pb.GameMessage, addr *net.UDPAddr) 
 
 func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.UDPAddr, announcementMsg *pb.GameMessage_AnnouncementMsg) {
 	// Проверяем, есть ли уже игра от этого мастера (по адресу)
+	// Определяем мастер-адрес из объявления, если он там указан
+	var masterAddr *net.UDPAddr
+	if announcement != nil && announcement.GetPlayers() != nil && len(announcement.GetPlayers().GetPlayers()) > 0 {
+		masterPlayer := announcement.GetPlayers().GetPlayers()[0]
+		if masterPlayer != nil && masterPlayer.GetIpAddress() != "" && masterPlayer.GetPort() != 0 {
+			addrStr := fmt.Sprintf("%s:%d", masterPlayer.GetIpAddress(), masterPlayer.GetPort())
+			if resolved, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
+				masterAddr = resolved
+			}
+		}
+	}
+	// если не получилось получить адрес из объявления — используем источник пакета
+	if masterAddr == nil && addr != nil {
+		masterAddr = addr
+	}
+
 	for i, game := range p.DiscoveredGames {
-		if game.MasterAddr.String() == addr.String() {
+		if game.MasterAddr != nil && masterAddr != nil && game.MasterAddr.String() == masterAddr.String() {
 			// Обновляем информацию об игре от этого мастера
 			p.DiscoveredGames[i].Players = announcement.GetPlayers()
 			p.DiscoveredGames[i].Config = announcement.GetConfig()
 			p.DiscoveredGames[i].CanJoin = announcement.GetCanJoin()
 			p.DiscoveredGames[i].GameName = announcement.GetGameName()
 			p.DiscoveredGames[i].AnnouncementMsg = announcementMsg
+			p.DiscoveredGames[i].MasterAddr = masterAddr
 			return
 		}
 	}
@@ -181,11 +210,11 @@ func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.
 		CanJoin:         announcement.GetCanJoin(),
 		GameName:        announcement.GetGameName(),
 		AnnouncementMsg: announcementMsg,
-		MasterAddr:      addr,
+		MasterAddr:      masterAddr,
 	}
 
 	p.DiscoveredGames = append(p.DiscoveredGames, newGame)
-	log.Printf("Discovered new game: '%s' from %s", announcement.GetGameName(), addr.String())
+	log.Printf("Discovered new game: '%s' from %s", announcement.GetGameName(), masterAddr.String())
 }
 
 func (p *Player) receiveMessagesLoop() {
@@ -235,6 +264,12 @@ func (p *Player) receiveMessagesLoop() {
 func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 	p.Node.Mu.Lock()
 	p.Node.LastInteraction[msg.GetSenderId()] = time.Now()
+
+	// Запоминаем последний известный UDP-адрес отправителя, если указан
+	if msg.GetSenderId() > 0 && addr != nil {
+		p.Node.KnownAddrs[msg.GetSenderId()] = addr
+	}
+
 	switch t := msg.Type.(type) {
 	case *pb.GameMessage_Ack:
 		if !p.haveId {
@@ -254,8 +289,21 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 			return
 		}
 
-		p.MasterAddr = addr
-		p.Node.MasterAddr = addr
+		// Устанавливаем MasterAddr из объявления, если там есть адрес мастера
+		if len(t.Announcement.Games) > 0 {
+			announcement := t.Announcement.Games[0]
+			if announcement != nil && announcement.GetPlayers() != nil && len(announcement.GetPlayers().GetPlayers()) > 0 {
+				masterPlayer := announcement.GetPlayers().GetPlayers()[0]
+				if masterPlayer != nil && masterPlayer.GetIpAddress() != "" && masterPlayer.GetPort() != 0 {
+					addrStr := fmt.Sprintf("%s:%d", masterPlayer.GetIpAddress(), masterPlayer.GetPort())
+					if resolved, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
+						p.MasterAddr = resolved
+						p.Node.MasterAddr = resolved
+					}
+				}
+			}
+		}
+
 		p.AnnouncementMsg = t.Announcement
 		// Устанавливаем Config из AnnouncementMsg
 		if len(t.Announcement.Games) > 0 {
@@ -560,7 +608,7 @@ func (p *Player) getMasterPlayerId() int32 {
 	if p.Node.State == nil || p.Node.State.Players == nil {
 		return 0
 	}
-	for _, player := range p.Node.State.Players.Players {
+	for _, player := range p.Node.State.Players.GetPlayers() {
 		if player.GetRole() == pb.NodeRole_MASTER {
 			return player.GetId()
 		}
@@ -572,7 +620,7 @@ func (p *Player) getDeputy() *pb.GamePlayer {
 	if p.Node.State == nil || p.Node.State.Players == nil {
 		return nil
 	}
-	for _, player := range p.Node.State.Players.Players {
+	for _, player := range p.Node.State.Players.GetPlayers() {
 		if player.GetRole() == pb.NodeRole_DEPUTY {
 			return player
 		}
@@ -776,12 +824,25 @@ func (p *Player) notifyPlayersAboutNewMaster() {
 			continue
 		}
 
-		addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
-		addr, err := net.ResolveUDPAddr("udp", addrStr)
-		if err != nil {
-			log.Printf("Error resolving address for player %d: %v", player.GetId(), err)
+		var addr *net.UDPAddr
+		// try explicit player address first
+		if player.GetIpAddress() != "" && player.GetPort() != 0 {
+			addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
+			if resolved, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
+				addr = resolved
+			}
+		}
+		// fallback to known last-seen address
+		if addr == nil {
+			if known, ok := p.Node.KnownAddrs[player.GetId()]; ok && known != nil {
+				addr = known
+			}
+		}
+		if addr == nil {
+			log.Printf("No valid address for player %d, skipping notification", player.GetId())
 			continue
 		}
+
 		playerAddrs = append(playerAddrs, struct {
 			addr     *net.UDPAddr
 			playerId int32

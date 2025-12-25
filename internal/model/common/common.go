@@ -46,6 +46,9 @@ type Node struct {
 	stopChan            chan struct{}  // канал для остановки горутин Node
 	wg                  sync.WaitGroup // для отслеживания завершения горутин
 	stopped             atomic.Bool    // атомарный флаг остановки
+
+	// KnownAddrs хранит последнее известное UDP-адреса для игрока по playerId
+	KnownAddrs map[int32]*net.UDPAddr
 }
 
 func NewNode(state *pb.GameState, config *pb.GameConfig, multicastConn *net.UDPConn,
@@ -64,6 +67,7 @@ func NewNode(state *pb.GameState, config *pb.GameConfig, multicastConn *net.UDPC
 		unconfirmedMessages: make(map[int64]*MessageEntry),
 		AckChan:             make(chan int64, 100), // Буферизованный канал для предотвращения блокировок
 		stopChan:            make(chan struct{}),
+		KnownAddrs:          make(map[int32]*net.UDPAddr),
 	}
 
 	node.Cond = sync.NewCond(&node.Mu)
@@ -158,7 +162,8 @@ func (n *Node) GetPlayerIdByAddress(addr *net.UDPAddr) int32 {
 			return player.GetId()
 		}
 	}
-	return -1
+	// Previously returned -1 when not found; return 0 (unknown) to avoid negative receiver IDs
+	return 0
 }
 
 // SendPing отправка
@@ -183,11 +188,20 @@ func (n *Node) SendMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 	}
 
 	// увеличиваем порядковый номер сообщения
-	msg.SenderId = proto.Int32(n.PlayerInfo.GetId())
+	// Устанавливаем SenderId только для типов сообщений, где это уместно.
 	switch msg.Type.(type) {
+	case *pb.GameMessage_Announcement, *pb.GameMessage_Discover:
+		// Для Announcement и Discover обычно не указываем sender_id — адрес берётся из UDP-источника
+		// Но оставляем msg_seq как задано (если не задан, назначим его ниже)
+		if msg.GetMsgSeq() == 0 {
+			msg.MsgSeq = proto.Int64(n.MsgSeq)
+			n.MsgSeq++
+		}
 	case *pb.GameMessage_Ack:
-
+		// Для Ack sender/receiver должны быть заданы заранее
+		// Не меняем msg_seq тут
 	default:
+		msg.SenderId = proto.Int32(n.PlayerInfo.GetId())
 		msg.MsgSeq = proto.Int64(n.MsgSeq)
 		n.MsgSeq++
 	}
@@ -199,6 +213,8 @@ func (n *Node) SendMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		return
 	}
 
+	// Если адрес мультикастовый — отправляем через UnicastConn (спецификация требует отдельный сокет для всего остального).
+	// Это также гарантирует, что исходный адрес/порт совпадает с UnicastConn.LocalAddr(), что ожидают другие клиенты.
 	_, err = n.UnicastConn.WriteToUDP(data, addr)
 	if err != nil {
 		log.Printf("Error sending Message: %v", err)
@@ -336,10 +352,19 @@ func (n *Node) resendUnconfirmedMessagesLoop(stateDelayMs int32) {
 					log.Printf("Error marshalling Message: %v", err)
 					continue
 				}
-				_, err = n.UnicastConn.WriteToUDP(data, entry.addr)
-				if err != nil {
-					fmt.Printf("Error sending Message: %v", err)
-					continue
+				// Если адрес мультикастовый — при переотправке также используем UnicastConn
+				if entry.addr != nil && entry.addr.IP != nil && entry.addr.IP.IsMulticast() {
+					_, err = n.UnicastConn.WriteToUDP(data, entry.addr)
+					if err != nil {
+						fmt.Printf("Error resending Message via UnicastConn to multicast addr: %v", err)
+						continue
+					}
+				} else {
+					_, err = n.UnicastConn.WriteToUDP(data, entry.addr)
+					if err != nil {
+						fmt.Printf("Error sending Message: %v", err)
+						continue
+					}
 				}
 
 				// Обновляем timestamp
