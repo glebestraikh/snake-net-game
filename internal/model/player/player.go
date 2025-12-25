@@ -263,11 +263,17 @@ func (p *Player) receiveMessagesLoop() {
 
 func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 	p.Node.Mu.Lock()
-	p.Node.LastInteraction[msg.GetSenderId()] = time.Now()
 
-	// Запоминаем последний известный UDP-адрес отправителя, если указан
-	if msg.GetSenderId() > 0 && addr != nil {
-		p.Node.KnownAddrs[msg.GetSenderId()] = addr
+	senderId := msg.GetSenderId()
+	if senderId == 0 && addr != nil {
+		senderId = p.Node.GetPlayerIdByAddress(addr)
+	}
+
+	p.Node.LastInteraction[senderId] = time.Now()
+
+	// Запоминаем последний известный UDP-адрес отправителя
+	if senderId > 0 && addr != nil {
+		p.Node.KnownAddrs[senderId] = addr
 	}
 
 	switch t := msg.Type.(type) {
@@ -341,6 +347,15 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		}
 		p.LastStateMsg = stateOrder
 		p.Node.State = t.State.GetState()
+
+		// Always update master address from incoming states if we are a player
+		if p.Node.Role != pb.NodeRole_MASTER {
+			if p.MasterAddr == nil || p.MasterAddr.String() != addr.String() {
+				log.Printf("Updating MasterAddr from incoming StateMsg: %v -> %v", p.MasterAddr, addr)
+				p.MasterAddr = addr
+				p.Node.MasterAddr = addr
+			}
+		}
 
 		// Проверяем есть ли у игрока змейка
 		hasSnake := false

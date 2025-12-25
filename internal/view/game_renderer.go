@@ -4,6 +4,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"log"
 	pb "snake-net-game/pkg/proto"
 )
 
@@ -82,6 +83,9 @@ func (gr *GameRenderer) RenderGameState(content *fyne.Container, state *pb.GameS
 		currX := snake.Points[0].GetX()
 		currY := snake.Points[0].GetY()
 
+		log.Printf("Rendering snake %d: head=(%d,%d), role=%v, points=%d",
+			snake.GetPlayerId(), currX, currY, role, len(snake.Points))
+
 		// Отрисовка головы
 		gr.drawSnakePart(content, currX, currY, role, 0, true)
 
@@ -105,15 +109,28 @@ func (gr *GameRenderer) RenderGameState(content *fyne.Container, state *pb.GameS
 				steps = absDY
 			}
 
+			if steps > 100 { // ПРОВЕРКА НА АНОМАЛЬНО ДЛИННЫЕ ЗМЕЙКИ
+				log.Printf("WARNING: Anomalous segment length: snake=%d, segment=%d, dx=%d, dy=%d, steps=%d",
+					snake.GetPlayerId(), i, dx, dy, steps)
+				if steps > 1000 {
+					steps = 1000 // Лимит для предотвращения зависаний
+				}
+			}
+
 			for s := int32(0); s < steps; s++ {
-				if dx > 0 {
-					currX = (currX + 1) % config.GetWidth()
-				} else if dx < 0 {
-					currX = (currX - 1 + config.GetWidth()) % config.GetWidth()
-				} else if dy > 0 {
-					currY = (currY + 1) % config.GetHeight()
-				} else if dy < 0 {
-					currY = (currY - 1 + config.GetHeight()) % config.GetHeight()
+				if config.GetWidth() > 0 {
+					if dx > 0 {
+						currX = (currX + 1) % config.GetWidth()
+					} else if dx < 0 {
+						currX = (currX - 1 + config.GetWidth()) % config.GetWidth()
+					}
+				}
+				if config.GetHeight() > 0 {
+					if dy > 0 {
+						currY = (currY + 1) % config.GetHeight()
+					} else if dy < 0 {
+						currY = (currY - 1 + config.GetHeight()) % config.GetHeight()
+					}
 				}
 
 				gr.drawSnakePart(content, currX, currY, role, bodyPartIdx, false)

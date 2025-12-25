@@ -309,13 +309,13 @@ func (gc *GameController) HandleKeyInputForPlayer(e *fyne.KeyEvent, playerNode *
 	}
 	playerNode.Node.Mu.Unlock()
 
-	// Если мы не MASTER, отправляем SteerMsg мастеру
-	if playerNode.MasterAddr == nil {
-		return // Нет адреса мастера
-	}
+	masterId := playerNode.Node.GetPlayerIdByAddress(playerNode.MasterAddr)
+	playerId := playerNode.Node.PlayerInfo.GetId()
 
 	steerMsg := &pb.GameMessage{
-		MsgSeq: proto.Int64(playerNode.Node.MsgSeq),
+		MsgSeq:     proto.Int64(playerNode.Node.MsgSeq),
+		SenderId:   proto.Int32(playerId),
+		ReceiverId: proto.Int32(masterId),
 		Type: &pb.GameMessage_Steer{
 			Steer: &pb.GameMessage_SteerMsg{
 				Direction: newDirection.Enum(),
@@ -323,5 +323,6 @@ func (gc *GameController) HandleKeyInputForPlayer(e *fyne.KeyEvent, playerNode *
 		},
 	}
 
+	log.Printf("Player sending SteerMsg: sender_id=%d, receiver_id=%d, direction=%v", playerId, masterId, newDirection)
 	playerNode.Node.SendMessage(steerMsg, playerNode.MasterAddr)
 }

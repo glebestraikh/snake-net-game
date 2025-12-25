@@ -138,16 +138,22 @@ func (n *Node) SendAck(msg *pb.GameMessage, addr *net.UDPAddr) {
 		return
 	}
 
-	id := n.GetPlayerIdByAddress(addr)
+	receiverId := msg.GetSenderId()
+	if receiverId == 0 {
+		receiverId = n.GetPlayerIdByAddress(addr)
+	}
 
 	ackMsg := &pb.GameMessage{
 		MsgSeq:     proto.Int64(msg.GetMsgSeq()),
 		SenderId:   proto.Int32(n.PlayerInfo.GetId()),
-		ReceiverId: proto.Int32(id),
+		ReceiverId: proto.Int32(receiverId),
 		Type: &pb.GameMessage_Ack{
 			Ack: &pb.GameMessage_AckMsg{},
 		},
 	}
+
+	log.Printf("Node: Sending ACK to %v [msgSeq=%d, receiverId=%d, myId=%d]",
+		addr, msg.GetMsgSeq(), receiverId, n.PlayerInfo.GetId())
 
 	n.SendMessage(ackMsg, addr)
 }
@@ -157,21 +163,38 @@ func (n *Node) GetPlayerIdByAddress(addr *net.UDPAddr) int32 {
 	if n.State == nil {
 		return 1
 	}
+
+	// Exact match first
 	for _, player := range n.State.Players.GetPlayers() {
 		if player.GetIpAddress() == addr.IP.String() && int(player.GetPort()) == addr.Port {
 			return player.GetId()
 		}
 	}
-	// Fallback for Master: Kotlin Master might omit its own IP/Port in the player list.
-	// We check if the address matches our known MasterAddr.
-	if n.MasterAddr != nil && n.MasterAddr.IP.String() == addr.IP.String() && n.MasterAddr.Port == addr.Port {
+
+	// Fallback for Master: match by IP and role
+	// Kotlin Master might omit its own IP/Port or use a different port than the one in announcement.
+	// If we have a Master in the state, and the incoming IP matches our known MasterAddr OR the source IP,
+	// we assume it's the Master.
+	for _, player := range n.State.Players.GetPlayers() {
+		if player.GetRole() == pb.NodeRole_MASTER {
+			// If IP is provided in list, check it. Otherwise trust the known MasterAddr or just role.
+			if (player.GetIpAddress() != "" && player.GetIpAddress() == addr.IP.String()) ||
+				(n.MasterAddr != nil && n.MasterAddr.IP.String() == addr.IP.String()) {
+				return player.GetId()
+			}
+		}
+	}
+
+	// Final fallback: if we have ONLY ONE master and we received a message from an unknown address,
+	// and we are a player, it's highly likely to be the master.
+	if n.Role != pb.NodeRole_MASTER {
 		for _, player := range n.State.Players.GetPlayers() {
 			if player.GetRole() == pb.NodeRole_MASTER {
 				return player.GetId()
 			}
 		}
 	}
-	// Previously returned -1 when not found; return 0 (unknown) to avoid negative receiver IDs
+
 	return 0
 }
 
@@ -188,67 +211,67 @@ func (n *Node) SendPing(addr *net.UDPAddr) {
 	n.SendMessage(pingMsg, addr)
 }
 
-// SendMessage отправка сообщения и добавление его в неподтверждённые
+// SendMessage маршализация и отправка сообщения
 func (n *Node) SendMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
-	// Проверяем что адрес не nil
-	if addr == nil {
-		log.Printf("Warning: SendMessage called with nil address, skipping")
+	if n.isStopped() || addr == nil {
 		return
 	}
 
-	// увеличиваем порядковый номер сообщения
-	// Устанавливаем SenderId только для типов сообщений, где это уместно.
-	switch msg.Type.(type) {
-	case *pb.GameMessage_Announcement, *pb.GameMessage_Discover:
-		// Для Announcement и Discover обычно не указываем sender_id — адрес берётся из UDP-источника
-		// Но оставляем msg_seq как задано (если не задан, назначим его ниже)
+	n.Mu.Lock()
+	// Для ACK сообщений НЕ инкрементируем MsgSeq и НЕ перезаписываем его,
+	// так как он должен совпадать с подтверждаемым сообщением.
+	isAck := false
+	if _, ok := msg.Type.(*pb.GameMessage_Ack); ok {
+		isAck = true
+	}
+
+	if !isAck {
+		// Инкрементируем только если MsgSeq еще не установлен (например, для новых сообщений)
 		if msg.GetMsgSeq() == 0 {
 			msg.MsgSeq = proto.Int64(n.MsgSeq)
 			n.MsgSeq++
 		}
-	case *pb.GameMessage_Ack:
-		// Для Ack sender/receiver должны быть заданы заранее
-		// Не меняем msg_seq тут
-	default:
-		msg.SenderId = proto.Int32(n.PlayerInfo.GetId())
-		msg.MsgSeq = proto.Int64(n.MsgSeq)
-		n.MsgSeq++
 	}
 
-	// отправляем
+	// Автоматически устанавливаем sender_id если он известен
+	if n.PlayerInfo != nil && n.PlayerInfo.GetId() > 0 {
+		if msg.GetSenderId() == 0 {
+			msg.SenderId = proto.Int32(n.PlayerInfo.GetId())
+		}
+	}
+
 	data, err := proto.Marshal(msg)
 	if err != nil {
 		log.Printf("Error marshalling Message: %v", err)
+		n.Mu.Unlock()
 		return
 	}
+
+	// Добавляем сообщение в очередь неподтвержденных, если это не ACK и не Announcement/Discover
+	if !isAck {
+		switch msg.Type.(type) {
+		case *pb.GameMessage_Announcement, *pb.GameMessage_Discover:
+			// Не добавляем
+		default:
+			n.unconfirmedMessages[msg.GetMsgSeq()] = &MessageEntry{
+				msg:       msg,
+				addr:      addr,
+				timestamp: time.Now(),
+			}
+		}
+	}
+	n.Mu.Unlock()
 
 	// Если адрес мультикастовый — отправляем через UnicastConn (спецификация требует отдельный сокет для всего остального).
 	// Это также гарантирует, что исходный адрес/порт совпадает с UnicastConn.LocalAddr(), что ожидают другие клиенты.
 	_, err = n.UnicastConn.WriteToUDP(data, addr)
 	if err != nil {
-		log.Printf("Error sending Message: %v", err)
+		log.Printf("Error sending Message to %v: %v", addr, err)
 		return
 	}
 
-	// добавляем сообщение в неподтверждённые
-	switch msg.Type.(type) {
-	case *pb.GameMessage_Announcement, *pb.GameMessage_Discover, *pb.GameMessage_Ack:
-
-	default:
-		n.Mu.Lock()
-		n.unconfirmedMessages[msg.GetMsgSeq()] = &MessageEntry{
-			msg:       msg,
-			addr:      addr,
-			timestamp: time.Now(),
-		}
-		n.Mu.Unlock()
-	}
-
-	ip := addr.IP
-	port := addr.Port
-	address := fmt.Sprintf("%s:%d", ip, port)
 	n.Mu.Lock()
-	n.LastSent[address] = time.Now()
+	n.LastSent[addr.String()] = time.Now()
 	n.Mu.Unlock()
 }
 
