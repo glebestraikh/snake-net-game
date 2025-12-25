@@ -123,7 +123,7 @@ func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.G
 					node.Mu.Unlock()
 					continue
 				}
-				stateCopy := proto.Clone(node.State).(*pb.GameState)
+				stateCopy := common.CompressGameState(node.State, node.Config)
 				configCopy := proto.Clone(node.Config).(*pb.GameConfig)
 
 				var playerScore int32

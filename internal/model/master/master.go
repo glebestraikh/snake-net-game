@@ -163,7 +163,7 @@ func (m *Master) sendAnnouncementMessage() {
 			m.Node.Mu.Unlock()
 
 			announcementMsg := &pb.GameMessage{
-				MsgSeq: proto.Int64(1),
+				MsgSeq: proto.Int64(0),
 				Type: &pb.GameMessage_Announcement{
 					Announcement: &pb.GameMessage_AnnouncementMsg{
 						Games: []*pb.GameAnnouncement{m.announcement},
@@ -465,7 +465,7 @@ func (m *Master) sendStateMessage() {
 		// Build compressed copy of snakes for sending without mutating master state
 		var msgSnakes []*pb.GameState_Snake
 		for _, snake := range snakesCopy {
-			compressed := compressSnakePoints(snake, m.Node.Config.GetWidth(), m.Node.Config.GetHeight())
+			compressed := common.CompressSnake(snake, m.Node.Config.GetWidth(), m.Node.Config.GetHeight())
 			msgSnakes = append(msgSnakes, compressed)
 		}
 
@@ -493,99 +493,6 @@ func (m *Master) sendStateMessage() {
 // (head first, then subsequent body cells) into the protobuf "key points" format:
 // first point is absolute head coordinate, each next point is a displacement (either x or y)
 // relative to the previous key point. This matches Kotlin client's expectations.
-func compressSnakePoints(s *pb.GameState_Snake, width, height int32) *pb.GameState_Snake {
-	if s == nil || len(s.GetPoints()) == 0 {
-		return s
-	}
-	pts := s.GetPoints()
-	// copy head as absolute
-	head := pts[0]
-	newPoints := []*pb.GameState_Coord{{X: proto.Int32(head.GetX()), Y: proto.Int32(head.GetY())}}
-	if len(pts) == 1 {
-		// only head
-		return &pb.GameState_Snake{
-			PlayerId:      proto.Int32(s.GetPlayerId()),
-			Points:        newPoints,
-			State:         s.State,
-			HeadDirection: s.HeadDirection,
-		}
-	}
-
-	// helper to compute wrapped delta between prev and cur
-	wrapDelta := func(prev, cur *pb.GameState_Coord) (int32, int32) {
-		dx := cur.GetX() - prev.GetX()
-		dy := cur.GetY() - prev.GetY()
-		// normalize with torus (choose minimal displacement)
-		if dx > width/2 {
-			dx -= width
-		} else if dx < -width/2 {
-			dx += width
-		}
-		if dy > height/2 {
-			dy -= height
-		} else if dy < -height/2 {
-			dy += height
-		}
-		return dx, dy
-	}
-
-	// accumulate runs of same axis
-	prev := pts[0]
-	var accum int32 = 0
-	var axisIsX *bool = nil // nil = not initialized; true=x, false=y
-
-	for i := 1; i < len(pts); i++ {
-		cur := pts[i]
-		dx, dy := wrapDelta(prev, cur)
-		// determine this step's axis and value
-		var stepIsX bool
-		var val int32
-		if dx != 0 {
-			stepIsX = true
-			val = dx
-		} else {
-			stepIsX = false
-			val = dy
-		}
-
-		if axisIsX == nil {
-			// start new run
-			b := stepIsX
-			axisIsX = &b
-			accum = val
-		} else if *axisIsX == stepIsX {
-			// same axis, accumulate
-			accum += val
-		} else {
-			// axis changed — flush previous run
-			if *axisIsX {
-				newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(accum), Y: proto.Int32(0)})
-			} else {
-				newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(0), Y: proto.Int32(accum)})
-			}
-			// start new run
-			b := stepIsX
-			axisIsX = &b
-			accum = val
-		}
-		prev = cur
-	}
-	// flush final run
-	if axisIsX != nil {
-		if *axisIsX {
-			newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(accum), Y: proto.Int32(0)})
-		} else {
-			newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(0), Y: proto.Int32(accum)})
-		}
-	}
-
-	return &pb.GameState_Snake{
-		PlayerId:      proto.Int32(s.GetPlayerId()),
-		Points:        newPoints,
-		State:         s.State,
-		HeadDirection: s.HeadDirection,
-	}
-}
 
 // получение списка адресов всех игроков (кроме мастера)
 func (m *Master) getAllPlayersUDPAddrs() []*net.UDPAddr {

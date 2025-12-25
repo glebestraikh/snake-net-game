@@ -157,9 +157,18 @@ func (n *Node) GetPlayerIdByAddress(addr *net.UDPAddr) int32 {
 	if n.State == nil {
 		return 1
 	}
-	for _, player := range n.State.Players.Players {
+	for _, player := range n.State.Players.GetPlayers() {
 		if player.GetIpAddress() == addr.IP.String() && int(player.GetPort()) == addr.Port {
 			return player.GetId()
+		}
+	}
+	// Fallback for Master: Kotlin Master might omit its own IP/Port in the player list.
+	// We check if the address matches our known MasterAddr.
+	if n.MasterAddr != nil && n.MasterAddr.IP.String() == addr.IP.String() && n.MasterAddr.Port == addr.Port {
+		for _, player := range n.State.Players.GetPlayers() {
+			if player.GetRole() == pb.NodeRole_MASTER {
+				return player.GetId()
+			}
 		}
 	}
 	// Previously returned -1 when not found; return 0 (unknown) to avoid negative receiver IDs
@@ -286,6 +295,117 @@ func (n *Node) RedirectUnconfirmedMessages(oldAddr, newAddr *net.UDPAddr) {
 }
 
 // isStopped проверяет, остановлен ли Node
+// CompressSnake converts a snake represented as a list of absolute coordinates
+// (head first, then subsequent body cells) into the protobuf "key points" format:
+// first point is absolute head coordinate, each next point is a displacement (either x or y)
+// relative to the previous key point. This matches protocol expectations and Kotlin client.
+func CompressSnake(s *pb.GameState_Snake, width, height int32) *pb.GameState_Snake {
+	if s == nil || len(s.GetPoints()) == 0 {
+		return s
+	}
+	pts := s.GetPoints()
+	// copy head as absolute
+	head := pts[0]
+	newPoints := []*pb.GameState_Coord{{X: proto.Int32(head.GetX()), Y: proto.Int32(head.GetY())}}
+	if len(pts) == 1 {
+		// only head
+		return &pb.GameState_Snake{
+			PlayerId:      proto.Int32(s.GetPlayerId()),
+			Points:        newPoints,
+			State:         s.State,
+			HeadDirection: s.HeadDirection,
+		}
+	}
+
+	// helper to compute wrapped delta between prev and cur
+	wrapDelta := func(prev, cur *pb.GameState_Coord) (int32, int32) {
+		dx := cur.GetX() - prev.GetX()
+		dy := cur.GetY() - prev.GetY()
+		// normalize with torus (choose minimal displacement)
+		if dx > width/2 {
+			dx -= width
+		} else if dx < -width/2 {
+			dx += width
+		}
+		if dy > height/2 {
+			dy -= height
+		} else if dy < -height/2 {
+			dy += height
+		}
+		return dx, dy
+	}
+
+	// accumulate runs of same axis
+	prev := pts[0]
+	var accum int32 = 0
+	var axisIsX *bool = nil // nil = not initialized; true=x, false=y
+
+	for i := 1; i < len(pts); i++ {
+		cur := pts[i]
+		dx, dy := wrapDelta(prev, cur)
+		// determine this step's axis and value
+		var stepIsX bool
+		var val int32
+		if dx != 0 {
+			stepIsX = true
+			val = dx
+		} else {
+			stepIsX = false
+			val = dy
+		}
+
+		if axisIsX == nil {
+			// start new run
+			b := stepIsX
+			axisIsX = &b
+			accum = val
+		} else if *axisIsX == stepIsX {
+			// same axis, accumulate
+			accum += val
+		} else {
+			// axis changed — flush previous run
+			if *axisIsX {
+				newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(accum), Y: proto.Int32(0)})
+			} else {
+				newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(0), Y: proto.Int32(accum)})
+			}
+			// start new run
+			b := stepIsX
+			axisIsX = &b
+			accum = val
+		}
+		prev = cur
+	}
+	// flush final run
+	if axisIsX != nil {
+		if *axisIsX {
+			newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(accum), Y: proto.Int32(0)})
+		} else {
+			newPoints = append(newPoints, &pb.GameState_Coord{X: proto.Int32(0), Y: proto.Int32(accum)})
+		}
+	}
+
+	return &pb.GameState_Snake{
+		PlayerId:      proto.Int32(s.GetPlayerId()),
+		Points:        newPoints,
+		State:         s.State,
+		HeadDirection: s.HeadDirection,
+	}
+}
+
+// CompressGameState returns a deep copy of the game state with all snakes compressed
+// into turning points representation. Original state is not mutated.
+func CompressGameState(state *pb.GameState, config *pb.GameConfig) *pb.GameState {
+	if state == nil {
+		return nil
+	}
+	newState := proto.Clone(state).(*pb.GameState)
+	for i, snake := range newState.Snakes {
+		newState.Snakes[i] = CompressSnake(snake, config.GetWidth(), config.GetHeight())
+	}
+	return newState
+}
+
 func (n *Node) isStopped() bool {
 	return n.stopped.Load()
 }

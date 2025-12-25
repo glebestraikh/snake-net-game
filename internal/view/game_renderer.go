@@ -74,64 +74,111 @@ func (gr *GameRenderer) RenderGameState(content *fyne.Container, state *pb.GameS
 	// Змеи с улучшенной графикой
 	for _, snake := range state.Snakes {
 		role := gr.getUserById(snake.GetPlayerId(), state)
+		if len(snake.Points) == 0 {
+			continue
+		}
 
-		for i, point := range snake.Points {
-			x := float32(point.GetX()) * CellSize
-			y := float32(point.GetY()) * CellSize
+		// Первая точка - голова (абсолютные координаты)
+		currX := snake.Points[0].GetX()
+		currY := snake.Points[0].GetY()
 
-			if i == 0 {
-				// Голова змеи - более крупная и округлая
-				var headColor = MasterSnakeHead
-				switch role {
-				case pb.NodeRole_MASTER:
-					headColor = MasterSnakeHead
-				case pb.NodeRole_NORMAL:
-					headColor = NormalSnakeHead
-				case pb.NodeRole_DEPUTY:
-					headColor = DeputySnakeHead
+		// Отрисовка головы
+		gr.drawSnakePart(content, currX, currY, role, 0, true)
+
+		// Последующие точки - смещения
+		bodyPartIdx := 1
+		for i := 1; i < len(snake.Points); i++ {
+			dx := snake.Points[i].GetX()
+			dy := snake.Points[i].GetY()
+
+			absDX := dx
+			if absDX < 0 {
+				absDX = -absDX
+			}
+			absDY := dy
+			if absDY < 0 {
+				absDY = -absDY
+			}
+
+			steps := absDX
+			if absDY > absDX {
+				steps = absDY
+			}
+
+			for s := int32(0); s < steps; s++ {
+				if dx > 0 {
+					currX = (currX + 1) % config.GetWidth()
+				} else if dx < 0 {
+					currX = (currX - 1 + config.GetWidth()) % config.GetWidth()
+				} else if dy > 0 {
+					currY = (currY + 1) % config.GetHeight()
+				} else if dy < 0 {
+					currY = (currY - 1 + config.GetHeight()) % config.GetHeight()
 				}
 
-				head := canvas.NewRectangle(headColor)
-				head.CornerRadius = 6
-				head.Resize(fyne.NewSize(CellSize-2, CellSize-2))
-				head.Move(fyne.NewPos(x+1, y+1))
-				content.Add(head)
-
-				// Глаза змеи
-				eye1 := canvas.NewCircle(GameFieldDark)
-				eye1.Resize(fyne.NewSize(4, 4))
-				eye1.Move(fyne.NewPos(x+6, y+6))
-				content.Add(eye1)
-
-				eye2 := canvas.NewCircle(GameFieldDark)
-				eye2.Resize(fyne.NewSize(4, 4))
-				eye2.Move(fyne.NewPos(x+14, y+6))
-				content.Add(eye2)
-			} else {
-				// Тело змеи - градиент от головы к хвосту
-				var bodyColor = MasterSnakeBody
-				switch role {
-				case pb.NodeRole_MASTER:
-					bodyColor = MasterSnakeBody
-				case pb.NodeRole_NORMAL:
-					bodyColor = NormalSnakeBody
-				case pb.NodeRole_DEPUTY:
-					bodyColor = DeputySnakeBody
-				}
-
-				// Уменьшаем размер к хвосту
-				sizeReduction := float32(i) * 0.3
-				if sizeReduction > 4 {
-					sizeReduction = 4
-				}
-
-				body := canvas.NewRectangle(bodyColor)
-				body.CornerRadius = 4
-				body.Resize(fyne.NewSize(CellSize-sizeReduction, CellSize-sizeReduction))
-				body.Move(fyne.NewPos(x+sizeReduction/2, y+sizeReduction/2))
-				content.Add(body)
+				gr.drawSnakePart(content, currX, currY, role, bodyPartIdx, false)
+				bodyPartIdx++
 			}
 		}
+	}
+}
+
+// drawSnakePart вспомогательная функция для отрисовки сегмента змеи
+func (gr *GameRenderer) drawSnakePart(content *fyne.Container, x, y int32, role pb.NodeRole, index int, isHead bool) {
+	posX := float32(x) * CellSize
+	posY := float32(y) * CellSize
+
+	if isHead {
+		// Голова змеи - более крупная и округлая
+		var headColor = MasterSnakeHead
+		switch role {
+		case pb.NodeRole_MASTER:
+			headColor = MasterSnakeHead
+		case pb.NodeRole_NORMAL:
+			headColor = NormalSnakeHead
+		case pb.NodeRole_DEPUTY:
+			headColor = DeputySnakeHead
+		}
+
+		head := canvas.NewRectangle(headColor)
+		head.CornerRadius = 6
+		head.Resize(fyne.NewSize(CellSize-2, CellSize-2))
+		head.Move(fyne.NewPos(posX+1, posY+1))
+		content.Add(head)
+
+		// Глаза змеи
+		eye1 := canvas.NewCircle(GameFieldDark)
+		eye1.Resize(fyne.NewSize(4, 4))
+		eye1.Move(fyne.NewPos(posX+6, posY+6))
+		content.Add(eye1)
+
+		eye2 := canvas.NewCircle(GameFieldDark)
+		eye2.Resize(fyne.NewSize(4, 4))
+		eye2.Move(fyne.NewPos(posX+14, posY+6))
+		content.Add(eye2)
+	} else {
+		// Тело змеи - градиент от головы к хвосту
+		var bodyColor = MasterSnakeBody
+		switch role {
+		case pb.NodeRole_MASTER:
+			bodyColor = MasterSnakeBody
+		case pb.NodeRole_NORMAL:
+			bodyColor = NormalSnakeBody
+		case pb.NodeRole_DEPUTY:
+			bodyColor = DeputySnakeBody
+		}
+
+		// Уменьшаем размер к хвосту
+		sizeReduction := float32(index) * 0.3
+		if sizeReduction > 4 {
+			sizeReduction = 4
+		}
+
+		body := canvas.NewRectangle(bodyColor)
+		body.CornerRadius = 4
+		body.Resize(fyne.NewSize(CellSize-sizeReduction, CellSize-sizeReduction))
+		body.Move(fyne.NewPos(posX+sizeReduction/2, posY+sizeReduction/2))
+		content.Add(body)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"snake-net-game/internal/model/common"
 	pb "snake-net-game/pkg/proto"
 	"time"
 )
@@ -95,7 +96,7 @@ func (m *Master) handleJoinMessage(msgSeq int64, joinMsg *pb.GameMessage_JoinMsg
 
 	// Compress snake points into key-points format expected by Kotlin UI
 	for _, snake := range stateMsg.GetType().(*pb.GameMessage_State).State.GetState().GetSnakes() {
-		compressed := compressSnakePoints(snake, m.Node.Config.GetWidth(), m.Node.Config.GetHeight())
+		compressed := common.CompressSnake(snake, m.Node.Config.GetWidth(), m.Node.Config.GetHeight())
 		snake.Points = compressed.GetPoints()
 	}
 
