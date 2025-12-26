@@ -68,7 +68,7 @@ func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 	playerId := playerNode.Node.PlayerInfo.GetId()
 	if currentRole != pb.NodeRole_NORMAL {
 		playerNode.Node.Mu.Unlock()
-		return // MASTER и DEPUTY не могут становиться VIEWER
+		return
 	}
 
 	playerNode.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
@@ -78,11 +78,11 @@ func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 	roleChangeMsg := &pb.GameMessage{
 		MsgSeq:     proto.Int64(playerNode.Node.MsgSeq),
 		SenderId:   proto.Int32(playerId),
-		ReceiverId: proto.Int32(1), // MASTER всегда ID 1
+		ReceiverId: proto.Int32(1),
 		Type: &pb.GameMessage_RoleChange{
 			RoleChange: &pb.GameMessage_RoleChangeMsg{
-				SenderRole:   pb.NodeRole_NORMAL.Enum(), // Текущая роль отправителя
-				ReceiverRole: pb.NodeRole_VIEWER.Enum(), // Желаемая новая роль
+				SenderRole:   pb.NodeRole_NORMAL.Enum(),
+				ReceiverRole: pb.NodeRole_VIEWER.Enum(),
 			},
 		},
 	}
@@ -90,11 +90,11 @@ func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 	playerNode.Node.SendMessage(roleChangeMsg, playerNode.MasterAddr)
 }
 
-func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.GameState, *pb.GameConfig, int32, string, pb.NodeRole)) {
+func (gc *GameController) startGameLoopInternal(node *common.Node, waitOutside bool, updateFunc func(*pb.GameState, *pb.GameConfig, int32, string, pb.NodeRole)) {
 	gc.gameTicker = time.NewTicker(time.Millisecond * 60)
 	gc.isRunning = true
 
-	if node.State == nil {
+	if waitOutside {
 		node.Mu.Lock()
 		for node.State == nil {
 			node.Cond.Wait()
@@ -103,6 +103,14 @@ func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.G
 	}
 
 	go func() {
+		if !waitOutside {
+			node.Mu.Lock()
+			for node.State == nil {
+				node.Cond.Wait()
+			}
+			node.Mu.Unlock()
+		}
+
 		for gc.isRunning {
 			select {
 			case <-gc.gameTicker.C:
@@ -145,57 +153,12 @@ func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.G
 	}()
 }
 
+func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.GameState, *pb.GameConfig, int32, string, pb.NodeRole)) {
+	gc.startGameLoopInternal(node, true, updateFunc)
+}
+
 func (gc *GameController) StartGameLoopForPlayer(playerNode *player.Player, updateFunc func(*pb.GameState, *pb.GameConfig, int32, string, pb.NodeRole)) {
-	gc.gameTicker = time.NewTicker(time.Millisecond * 60)
-	gc.isRunning = true
-
-	go func() {
-		playerNode.Node.Mu.Lock()
-		for playerNode.Node.State == nil {
-			playerNode.Node.Cond.Wait()
-		}
-		playerNode.Node.Mu.Unlock()
-
-		for gc.isRunning {
-			select {
-			case <-gc.gameTicker.C:
-				playerNode.Node.Mu.Lock()
-				if playerNode.Node.State == nil {
-					playerNode.Node.Mu.Unlock()
-					continue
-				}
-				var stateCopy *pb.GameState
-				if playerNode.Node.PlayerInfo.GetRole() == pb.NodeRole_MASTER {
-					stateCopy = common.CompressGameState(playerNode.Node.State, playerNode.Node.Config)
-				} else {
-					stateCopy = proto.Clone(playerNode.Node.State).(*pb.GameState)
-				}
-				configCopy := proto.Clone(playerNode.Node.Config).(*pb.GameConfig)
-
-				var playerScore int32
-				playerFound := false
-				for _, gamePlayer := range playerNode.Node.State.GetPlayers().GetPlayers() {
-					if gamePlayer.GetId() == playerNode.Node.PlayerInfo.GetId() {
-						playerScore = gamePlayer.GetScore()
-						playerFound = true
-						break
-					}
-				}
-
-				if !playerFound {
-					playerScore = 0
-				}
-
-				playerName := playerNode.Node.PlayerInfo.GetName()
-				playerRole := playerNode.Node.PlayerInfo.GetRole()
-				playerNode.Node.Mu.Unlock()
-
-				fyne.Do(func() {
-					updateFunc(stateCopy, configCopy, playerScore, playerName, playerRole)
-				})
-			}
-		}
-	}()
+	gc.startGameLoopInternal(playerNode.Node, false, updateFunc)
 }
 
 func (gc *GameController) StopGameLoop() {
@@ -252,7 +215,6 @@ func (gc *GameController) HandleKeyInputForMaster(e *fyne.KeyEvent, node *common
 	node.Mu.Unlock()
 }
 
-// HandleKeyInputForPlayer обрабатывает ввод клавиш для игрока
 func (gc *GameController) HandleKeyInputForPlayer(e *fyne.KeyEvent, playerNode *player.Player) {
 	var newDirection pb.Direction
 
