@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-// MasterGameView представляет экран игры для мастера
 type MasterGameView struct {
 	window     fyne.Window
 	controller *controller.GameController
@@ -25,7 +24,6 @@ type MasterGameView struct {
 	roleLabel  *widget.Label
 }
 
-// NewMasterGameView создает новое представление игры мастера
 func NewMasterGameView(window fyne.Window, controller *controller.GameController, config *pb.GameConfig, gameName string) *MasterGameView {
 	return &MasterGameView{
 		window:     window,
@@ -36,7 +34,6 @@ func NewMasterGameView(window fyne.Window, controller *controller.GameController
 	}
 }
 
-// Show отображает экран игры мастера
 func (mgv *MasterGameView) Show() {
 	masterNode := mgv.controller.StartNewGame(mgv.config, mgv.gameName)
 
@@ -48,19 +45,15 @@ func (mgv *MasterGameView) Show() {
 
 	mgv.infoPanel = NewInfoPanel(mgv.config,
 		func() {
-			// Главное меню
 			mgv.controller.StopGameLoop()
 			mainView := NewMainView(mgv.window, mgv.controller)
 			mainView.ShowMainMenu()
 		},
 		func() {
-			// Выход из приложения
 			mgv.controller.StopGameLoop()
 			mgv.window.Close()
 		},
 		func() {
-			// Стать наблюдателем (для мастера пока недоступно)
-			// TODO: реализовать переход мастера в VIEWER
 		},
 		mgv.scoreLabel, mgv.nameLabel, mgv.roleLabel, false)
 
@@ -78,7 +71,6 @@ func (mgv *MasterGameView) Show() {
 func (mgv *MasterGameView) startGameLoop(masterNode *master.Master, gameContent *fyne.Container) {
 	rand.NewSource(time.Now().UnixNano())
 
-	// Обработка клавиш
 	mgv.window.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
 		mgv.controller.HandleKeyInputForMaster(e, masterNode.Node)
 	})
