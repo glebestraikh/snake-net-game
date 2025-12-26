@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-// GameController управляет логикой игры
 type GameController struct {
 	window     fyne.Window
 	multConn   *net.UDPConn
@@ -20,7 +19,6 @@ type GameController struct {
 	isRunning  bool
 }
 
-// NewGameController создает новый контроллер игры
 func NewGameController(window fyne.Window, multConn *net.UDPConn) *GameController {
 	return &GameController{
 		window:   window,
@@ -28,14 +26,12 @@ func NewGameController(window fyne.Window, multConn *net.UDPConn) *GameControlle
 	}
 }
 
-// StartNewGame начинает новую игру как мастер
 func (gc *GameController) StartNewGame(config *pb.GameConfig, gameName string) *master.Master {
 	masterNode := master.NewMaster(gc.multConn, config, gameName)
 	go masterNode.Start()
 	return masterNode
 }
 
-// JoinGame присоединяется к существующей игре
 func (gc *GameController) JoinGame(playerNode *player.Player, playerName string, selectedGame *player.DiscoveredGame, isViewer bool) {
 	playerNode.Node.PlayerInfo.Name = proto.String(playerName)
 	playerNode.Node.Config = selectedGame.Config
@@ -43,12 +39,10 @@ func (gc *GameController) JoinGame(playerNode *player.Player, playerName string,
 	playerNode.AnnouncementMsg = selectedGame.AnnouncementMsg
 	playerNode.IsViewer = isViewer
 
-	// Устанавливаем роль сразу, если присоединяемся как VIEWER
 	if isViewer {
 		playerNode.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
 	}
 
-	// Debug log to help diagnose join issues
 	if playerNode.MasterAddr != nil {
 		log.Printf("JoinGame: master addr set to %s, announcement present=%v", playerNode.MasterAddr.String(), playerNode.AnnouncementMsg != nil)
 	} else {
@@ -58,21 +52,17 @@ func (gc *GameController) JoinGame(playerNode *player.Player, playerName string,
 	playerNode.Start()
 }
 
-// CreatePlayer создает нового игрока
 func (gc *GameController) CreatePlayer() *player.Player {
 	playerNode := player.NewPlayer(gc.multConn)
 	go playerNode.ReceiveMulticastMessages()
 	return playerNode
 }
 
-// BecomeViewer отправляет RoleChangeMsg для перехода игрока в режим VIEWER
-// Только NORMAL игроки могут становиться VIEWER (не MASTER и не DEPUTY)
 func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 	if playerNode.MasterAddr == nil {
 		return
 	}
 
-	// Проверяем что игрок NORMAL (не MASTER и не DEPUTY)
 	playerNode.Node.Mu.Lock()
 	currentRole := playerNode.Node.PlayerInfo.GetRole()
 	playerId := playerNode.Node.PlayerInfo.GetId()
@@ -81,7 +71,6 @@ func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 		return // MASTER и DEPUTY не могут становиться VIEWER
 	}
 
-	// Обновляем локальную роль
 	playerNode.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
 	playerNode.IsViewer = true
 	playerNode.Node.Mu.Unlock()
@@ -101,7 +90,6 @@ func (gc *GameController) BecomeViewerForPlayer(playerNode *player.Player) {
 	playerNode.Node.SendMessage(roleChangeMsg, playerNode.MasterAddr)
 }
 
-// StartGameLoop запускает игровой цикл для мастера
 func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.GameState, *pb.GameConfig, int32, string, pb.NodeRole)) {
 	gc.gameTicker = time.NewTicker(time.Millisecond * 60)
 	gc.isRunning = true
@@ -141,8 +129,6 @@ func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.G
 					}
 				}
 
-				// Если игрок не найден в списке (был удален), продолжаем показывать игру со счетом 0
-				// Это позволяет наблюдать за игрой даже после смерти
 				if !playerFound {
 					playerScore = 0
 				}
@@ -159,7 +145,6 @@ func (gc *GameController) StartGameLoop(node *common.Node, updateFunc func(*pb.G
 	}()
 }
 
-// StartGameLoopForPlayer запускает игровой цикл для игрока
 func (gc *GameController) StartGameLoopForPlayer(playerNode *player.Player, updateFunc func(*pb.GameState, *pb.GameConfig, int32, string, pb.NodeRole)) {
 	gc.gameTicker = time.NewTicker(time.Millisecond * 60)
 	gc.isRunning = true
@@ -197,8 +182,6 @@ func (gc *GameController) StartGameLoopForPlayer(playerNode *player.Player, upda
 					}
 				}
 
-				// Если игрок не найден в списке (был удален), продолжаем показывать игру со счетом 0
-				// Это позволяет наблюдать за игрой даже после смерти
 				if !playerFound {
 					playerScore = 0
 				}
@@ -215,7 +198,6 @@ func (gc *GameController) StartGameLoopForPlayer(playerNode *player.Player, upda
 	}()
 }
 
-// StopGameLoop останавливает игровой цикл
 func (gc *GameController) StopGameLoop() {
 	if gc.gameTicker != nil {
 		gc.gameTicker.Stop()
@@ -223,7 +205,6 @@ func (gc *GameController) StopGameLoop() {
 	gc.isRunning = false
 }
 
-// HandleKeyInputForMaster обрабатывает ввод клавиш для мастера
 func (gc *GameController) HandleKeyInputForMaster(e *fyne.KeyEvent, node *common.Node) {
 	var newDirection pb.Direction
 
@@ -253,13 +234,13 @@ func (gc *GameController) HandleKeyInputForMaster(e *fyne.KeyEvent, node *common
 			isOpposite := false
 			switch currentDirection {
 			case pb.Direction_UP:
-				isOpposite = (newDirection == pb.Direction_DOWN)
+				isOpposite = newDirection == pb.Direction_DOWN
 			case pb.Direction_DOWN:
-				isOpposite = (newDirection == pb.Direction_UP)
+				isOpposite = newDirection == pb.Direction_UP
 			case pb.Direction_LEFT:
-				isOpposite = (newDirection == pb.Direction_RIGHT)
+				isOpposite = newDirection == pb.Direction_RIGHT
 			case pb.Direction_RIGHT:
-				isOpposite = (newDirection == pb.Direction_LEFT)
+				isOpposite = newDirection == pb.Direction_LEFT
 			}
 
 			if !isOpposite {
@@ -288,24 +269,22 @@ func (gc *GameController) HandleKeyInputForPlayer(e *fyne.KeyEvent, playerNode *
 		return
 	}
 
-	// Если мы сами MASTER, меняем направление змейки напрямую
 	playerNode.Node.Mu.Lock()
 	if playerNode.Node.PlayerInfo.GetRole() == pb.NodeRole_MASTER {
 		playerId := playerNode.Node.PlayerInfo.GetId()
 		for _, snake := range playerNode.Node.State.Snakes {
 			if snake.GetPlayerId() == playerId {
-				// Проверяем, не пытаемся ли мы повернуть в противоположном направлении
 				currentDir := snake.GetHeadDirection()
 				isOpposite := false
 				switch currentDir {
 				case pb.Direction_UP:
-					isOpposite = (newDirection == pb.Direction_DOWN)
+					isOpposite = newDirection == pb.Direction_DOWN
 				case pb.Direction_DOWN:
-					isOpposite = (newDirection == pb.Direction_UP)
+					isOpposite = newDirection == pb.Direction_UP
 				case pb.Direction_LEFT:
-					isOpposite = (newDirection == pb.Direction_RIGHT)
+					isOpposite = newDirection == pb.Direction_RIGHT
 				case pb.Direction_RIGHT:
-					isOpposite = (newDirection == pb.Direction_LEFT)
+					isOpposite = newDirection == pb.Direction_LEFT
 				}
 
 				if !isOpposite {
