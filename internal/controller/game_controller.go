@@ -313,7 +313,7 @@ func (gc *GameController) HandleKeyInputForPlayer(e *fyne.KeyEvent, playerNode *
 	playerId := playerNode.Node.PlayerInfo.GetId()
 
 	steerMsg := &pb.GameMessage{
-		MsgSeq:     proto.Int64(playerNode.Node.MsgSeq),
+		MsgSeq:     proto.Int64(0),
 		SenderId:   proto.Int32(playerId),
 		ReceiverId: proto.Int32(masterId),
 		Type: &pb.GameMessage_Steer{
