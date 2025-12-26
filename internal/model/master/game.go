@@ -9,10 +9,7 @@ import (
 	pb "snake-net-game/pkg/proto"
 )
 
-// GenerateFood генерация еды
 func (m *Master) GenerateFood() {
-	// На поле в каждый момент времени присутствует еда в количестве,
-	// вычисляемом по формуле (food_static + (число ALIVE-змеек)).
 	requireFood := m.Node.Config.GetFoodStatic() + int32(len(m.Node.State.Snakes))
 	currentFood := int32(len(m.Node.State.GetFoods()))
 
@@ -60,7 +57,6 @@ func (m *Master) isCellEmpty(x, y int32) bool {
 	return true
 }
 
-// UpdateGameState обновление состояния игры
 func (m *Master) UpdateGameState() {
 	for _, snake := range m.Node.State.Snakes {
 		m.moveSnake(snake)
@@ -68,18 +64,14 @@ func (m *Master) UpdateGameState() {
 
 	m.checkCollisions()
 
-	// Проверяем нужно ли передать роль MASTER (если сам MASTER был убит)
 	if m.needTransferMaster {
 		m.needTransferMaster = false
 		log.Printf("MASTER was killed, transferring control to DEPUTY and becoming observer")
-		// Обработаем это в отдельной горутине после освобождения мьютекса
 		go m.transferMasterToDeputy()
 	}
 
-	// Проверяем нужно ли назначить нового DEPUTY после смерти предыдущего
 	if m.needNewDeputy {
 		m.needNewDeputy = false
-		// Вызываем findNewDeputy БЕЗ мьютекса (он будет захвачен внутри)
 		go m.findNewDeputy()
 	}
 }
@@ -91,7 +83,6 @@ func (m *Master) moveSnake(snake *pb.GameState_Snake) {
 		Y: proto.Int32(head.GetY()),
 	}
 
-	// изменение координат
 	switch snake.GetHeadDirection() {
 	case pb.Direction_UP:
 		newHead.Y = proto.Int32(newHead.GetY() - 1)
@@ -103,7 +94,6 @@ func (m *Master) moveSnake(snake *pb.GameState_Snake) {
 		newHead.X = proto.Int32(newHead.GetX() + 1)
 	}
 
-	// поведение при столкновении со стеной
 	if newHead.GetX() < 0 {
 		newHead.X = proto.Int32(m.Node.Config.GetWidth() - 1)
 	} else if newHead.GetX() >= m.Node.Config.GetWidth() {
@@ -115,12 +105,10 @@ func (m *Master) moveSnake(snake *pb.GameState_Snake) {
 		newHead.Y = proto.Int32(0)
 	}
 
-	// добавляем новую голову
 	snake.Points = append([]*pb.GameState_Coord{newHead}, snake.Points...)
 	if !m.isFoodEaten(newHead) {
 		snake.Points = snake.Points[:len(snake.Points)-1]
 	} else {
-		// игрок заработал +1 балл
 		snakeId := snake.GetPlayerId()
 		for _, player := range m.players.GetPlayers() {
 			if player.GetId() == snakeId {
@@ -128,7 +116,6 @@ func (m *Master) moveSnake(snake *pb.GameState_Snake) {
 				break
 			}
 		}
-		// Также обновляем в State.Players для синхронизации
 		for _, player := range m.Node.State.Players.GetPlayers() {
 			if player.GetId() == snakeId {
 				player.Score = proto.Int32(player.GetScore() + 1)
@@ -148,35 +135,26 @@ func (m *Master) isFoodEaten(head *pb.GameState_Coord) bool {
 	return false
 }
 
-// Проверяем столкновения с другими змеями
 func (m *Master) checkCollisions() {
-	heads := make(map[string]int32)
+	heads := make(map[string][]int32)
 
 	for _, snake := range m.Node.State.Snakes {
 		head := snake.Points[0]
 		point := fmt.Sprintf("%d,%d", head.GetX(), head.GetY())
-		heads[point] = snake.GetPlayerId()
+		heads[point] = append(heads[point], snake.GetPlayerId())
 	}
 
-	// проверяем, есть ли клетки с более чем одной головой
-	for key := range heads {
-		count := 0
-		var crashedPlayers []int32
-		for k, pid := range heads {
-			if k == key {
-				count++
-				crashedPlayers = append(crashedPlayers, pid)
-			}
-		}
-		// несколько голов на одной клетке -- все погибают
-		if count > 1 {
-			for _, pid := range crashedPlayers {
-				m.killSnake(pid, pid)
+	toKill := make(map[int32]int32)
+
+	for point, pids := range heads {
+		if len(pids) > 1 {
+			log.Printf("Multiple heads on cell %s -> marking %d snakes for death", point, len(pids))
+			for _, pid := range pids {
+				toKill[pid] = pid
 			}
 		}
 	}
 
-	// проверяем столкновения головы змейки с телом других змей
 	for _, snake := range m.Node.State.Snakes {
 		head := snake.Points[0]
 		headX, headY := head.GetX(), head.GetY()
@@ -187,14 +165,20 @@ func (m *Master) checkCollisions() {
 					continue
 				}
 				if point.GetX() == headX && point.GetY() == headY {
-					m.killSnake(snake.GetPlayerId(), otherSnake.GetPlayerId())
+					// Если уже помечено на смерть, оставляем существующего убийцу
+					if _, exists := toKill[snake.GetPlayerId()]; !exists {
+						toKill[snake.GetPlayerId()] = otherSnake.GetPlayerId()
+					}
 				}
 			}
 		}
 	}
+
+	for crashedPid, killer := range toKill {
+		m.killSnake(crashedPid, killer)
+	}
 }
 
-// убираем умершую змею
 func (m *Master) killSnake(crashedPlayerId, killer int32) {
 
 	var indexToRemove int
@@ -210,7 +194,6 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 	if snakeToRemove != nil {
 		for _, point := range snakeToRemove.Points {
 			if rand.Float32() < 0.5 {
-				// заменяем на еду
 				newFood := &pb.GameState_Coord{
 					X: proto.Int32(point.GetX()),
 					Y: proto.Int32(point.GetY()),
@@ -222,14 +205,12 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 	}
 
 	if crashedPlayerId != killer {
-		// Обновляем счет в m.players
 		for _, player := range m.players.Players {
 			if player.GetId() == killer {
 				player.Score = proto.Int32(player.GetScore() + 1)
 				break
 			}
 		}
-		// Также обновляем в State.Players для синхронизации
 		for _, player := range m.Node.State.Players.GetPlayers() {
 			if player.GetId() == killer {
 				player.Score = proto.Int32(player.GetScore() + 1)
@@ -239,17 +220,14 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 	}
 
 	if crashedPlayerId != m.Node.PlayerInfo.GetId() {
-		// Сохраняем информацию о игроке (НЕ удаляем его из списка!)
 		var wasDeputy bool
 		var playerAddr *net.UDPAddr
 
 		for _, player := range m.players.Players {
 			if player.GetId() == crashedPlayerId {
 				wasDeputy = player.GetRole() == pb.NodeRole_DEPUTY
-				// Устанавливаем роль VIEWER для умершего игрока
 				player.Role = pb.NodeRole_VIEWER.Enum()
 
-				// Также обновляем в State.Players для синхронизации
 				for _, statePlayer := range m.Node.State.Players.GetPlayers() {
 					if statePlayer.GetId() == crashedPlayerId {
 						statePlayer.Role = pb.NodeRole_VIEWER.Enum()
@@ -257,7 +235,6 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 					}
 				}
 
-				// Сохраняем адрес для списка наблюдателей
 				addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
 				addr, err := net.ResolveUDPAddr("udp", addrStr)
 				if err == nil {
@@ -266,15 +243,8 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 				break
 			}
 		}
-
-		// НЕ вызываем removePlayerUnsafe! Игрок остается в списке игроков
-		// Это позволяет UI продолжать отображать его роль и счет
 		log.Printf("Player ID: %d has crashed but remains in game as observer.", crashedPlayerId)
-
-		// Добавляем адрес игрока в список наблюдателей
-		// Игрок продолжит получать StateMsg и наблюдать за игрой
 		if playerAddr != nil {
-			// Проверяем, не добавлен ли уже
 			alreadyAdded := false
 			for _, addr := range m.observerAddrs {
 				if addr.String() == playerAddr.String() {
@@ -287,17 +257,12 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 				log.Printf("Player ID: %d added to observers, will continue receiving game updates", crashedPlayerId)
 			}
 		}
-
-		// Если был DEPUTY, нужно назначить нового после освобождения мьютекса
 		if wasDeputy {
 			log.Printf("DEPUTY (player ID: %d) was killed, need to select new DEPUTY", crashedPlayerId)
 			m.needNewDeputy = true
 		}
 	} else {
-		// Сам MASTER был убит!
 		log.Printf("MASTER (player ID: %d) has been killed!", crashedPlayerId)
-		// MASTER должен передать управление DEPUTY и стать наблюдателем
-		// Устанавливаем флаг что MASTER убит - обработаем это после освобождения мьютекса
 		m.needTransferMaster = true
 	}
 }
@@ -311,7 +276,6 @@ func (m *Master) hasFreeSquare(state *pb.GameState, config *pb.GameConfig, squar
 		occupied[i] = make([]bool, height)
 	}
 
-	// Отмечаем клетки, занятые змейками
 	for _, snake := range state.Snakes {
 		for _, point := range snake.Points {
 			x := ((point.GetX() % width) + width) % width
@@ -320,7 +284,6 @@ func (m *Master) hasFreeSquare(state *pb.GameState, config *pb.GameConfig, squar
 		}
 	}
 
-	// Проверяем все возможные начальные точки квадрата (с учётом тора)
 	for startX := int32(0); startX < width; startX++ {
 		for startY := int32(0); startY < height; startY++ {
 			if isSquareFreeOnTorus(occupied, startX, startY, squareSize, width, height) {
@@ -345,18 +308,6 @@ func isSquareFreeOnTorus(occupied [][]bool, startX, startY, squareSize, width, h
 	return true
 }
 
-func isSquareFree(occupied [][]bool, startX, startY, squareSize int32) bool {
-	for x := startX; x < startX+squareSize; x++ {
-		for y := startY; y < startY+squareSize; y++ {
-			if occupied[x][y] {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// transferMasterToDeputy передает роль MASTER к DEPUTY когда сам MASTER был убит
 func (m *Master) transferMasterToDeputy() {
 	m.Node.Mu.Lock()
 
@@ -385,34 +336,22 @@ func (m *Master) transferMasterToDeputy() {
 
 	log.Printf("Transferring MASTER role to DEPUTY (player ID: %d)", deputyId)
 
-	// ОБНОВЛЯЕМ РОЛИ АТОМАРНО
-	// Это предотвращает отправку промежуточных некорректных состояний
 	deputy.Role = pb.NodeRole_MASTER.Enum()
 
-	// Метим игру как недоступную на этом узле (на всякий случай)
 	m.announcement.CanJoin = proto.Bool(false)
 
-	// Останавливаем работу этого MASTER (он теперь наблюдатель)
 	log.Printf("Old MASTER becoming VIEWER observer, stopping master duties\n")
 
-	// Устанавливаем новый адрес мастера (теперь это DEPUTY)
 	m.Node.MasterAddr = deputyAddr
-	// Меняем роль на VIEWER
 	m.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
-	// Устанавливаем флаг stopped, чтобы управляющие горутины (sendStateMessage) немедленно остановились
 	m.stopped = true
 
-	// Очищаем очередь неподтвержденных сообщений, так как мы больше не мастер
 	log.Printf("Clearing %d unconfirmed Master messages", m.Node.UnconfirmedMessages())
 	m.Node.ClearUnconfirmedMessages()
 
-	// ОЧЕНЬ ВАЖНО: уведомляем UI
 	m.Node.Cond.Broadcast()
 	m.Node.Mu.Unlock()
 
-	// Собираем адреса всех игроков для уведомления
-	// Мы уведомляем ВСЕХ игроков о том, что новый мастер теперь DEPUTY,
-	// и что мы сами стали VIEWER. Это позволит игрокам сразу переключиться.
 	var playersToNotify []struct {
 		addr *net.UDPAddr
 		id   int32
@@ -432,11 +371,9 @@ func (m *Master) transferMasterToDeputy() {
 
 	for _, pInfo := range playersToNotify {
 		roleChangeMsg := &pb.GameMessage{
-			MsgSeq:   proto.Int64(m.Node.MsgSeq),
-			SenderId: proto.Int32(m.Node.PlayerInfo.GetId()),
-			// В сообщении о передаче мастерства ReceiverId содержит ID нового мастера (deputyId),
-			// а не ID получателя пакета — иначе каждый получатель будет считать себя новым MASTER.
-			ReceiverId: proto.Int32(deputyId),
+			MsgSeq:     proto.Int64(m.Node.MsgSeq),
+			SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
+			ReceiverId: proto.Int32(pInfo.id),
 			Type: &pb.GameMessage_RoleChange{
 				RoleChange: &pb.GameMessage_RoleChangeMsg{
 					SenderRole:   pb.NodeRole_VIEWER.Enum(),
@@ -449,7 +386,6 @@ func (m *Master) transferMasterToDeputy() {
 		log.Printf("Sent RoleChange (New Master ID: %d) to player ID: %d at %v", deputyId, pInfo.id, pInfo.addr)
 	}
 
-	// Закрываем stopChan чтобы остановить управляющие горутины окончательно
 	close(m.stopChan)
 
 	log.Printf("Old MASTER successfully transitioned to VIEWER mode")
