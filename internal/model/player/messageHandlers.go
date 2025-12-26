@@ -15,12 +15,10 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 		p.Node.PlayerInfo.GetId(), msg.GetSenderId(), msg.GetReceiverId(),
 		roleChangeMsg.GetSenderRole(), roleChangeMsg.GetReceiverRole())
 
-	// Проверяем - это сообщение для нас или уведомление о смене мастера
 	isForUs := p.Node.PlayerInfo.GetId() != 0 && msg.GetReceiverId() != 0 && msg.GetReceiverId() == p.Node.PlayerInfo.GetId()
 	isMasterHandover := roleChangeMsg.GetSenderRole() == pb.NodeRole_VIEWER && roleChangeMsg.GetReceiverRole() == pb.NodeRole_MASTER
 
 	if !isForUs && !isMasterHandover {
-		// Это сообщение не для нас и не критическое уведомление, игнорируем
 		log.Printf("Player ID %d: Ignoring RoleChange not for us (receiverId=%d, our ID=%d)",
 			p.Node.PlayerInfo.GetId(), msg.GetReceiverId(), p.Node.PlayerInfo.GetId())
 		return
@@ -28,14 +26,12 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 
 	newRole := roleChangeMsg.GetReceiverRole()
 
-	// Если это уведомление о смене мастера, обновляем MasterAddr даже если сообщение не нашему ID
 	if isMasterHandover && !isForUs {
 		newMasterId := msg.GetReceiverId()
 		log.Printf("Player ID %d: Master handover detected (Sender ID %d -> Receiver ID %d)",
 			p.Node.PlayerInfo.GetId(), msg.GetSenderId(), newMasterId)
 
 		var newMasterAddr *net.UDPAddr
-		// Пытаемся найти адрес нового мастера
 		if p.Node.State != nil && p.Node.State.Players != nil {
 			for _, player := range p.Node.State.Players.Players {
 				if player.GetId() == newMasterId {
@@ -51,7 +47,6 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 			}
 		}
 
-		// Если в состоянии нет, пробуем источник пакета (если это и есть новый мастер)
 		if newMasterAddr == nil && addr != nil && msg.GetSenderId() == newMasterId {
 			newMasterAddr = addr
 			log.Printf("Using packet source as new Master address: %v", newMasterAddr)
@@ -65,16 +60,13 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 		return
 	}
 
-	// Обновляем роль игрока (если сообщение для нас)
 	p.Node.PlayerInfo.Role = newRole.Enum()
 	log.Printf("Player ID %d: Updated PlayerInfo.Role to %v", p.Node.PlayerInfo.GetId(), newRole)
 
-	// Если переходим в режим VIEWER, обновляем флаг
 	if newRole == pb.NodeRole_VIEWER {
 		p.IsViewer = true
 	}
 
-	// Обновляем роль в состоянии игры, если оно доступно
 	if p.Node.State != nil && p.Node.State.Players != nil {
 		for _, player := range p.Node.State.Players.Players {
 			if player.GetId() == p.Node.PlayerInfo.GetId() {
@@ -89,13 +81,10 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr)
 		log.Printf("Assigned as DEPUTY")
 	case pb.NodeRole_MASTER:
 		log.Printf("Received MASTER role! Taking over as MASTER...")
-		// DEPUTY становится MASTER - нужно вызвать becomeMaster
 		go p.becomeMaster()
 	case pb.NodeRole_VIEWER:
 		log.Printf("Now in VIEWER mode - will continue observing the game")
 		p.IsViewer = true
-	case pb.NodeRole_NORMAL:
-		log.Printf("Assigned as NORMAL player")
 	default:
 		log.Printf("Received unknown role: %v", newRole)
 	}
