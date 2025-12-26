@@ -432,9 +432,11 @@ func (m *Master) transferMasterToDeputy() {
 
 	for _, pInfo := range playersToNotify {
 		roleChangeMsg := &pb.GameMessage{
-			MsgSeq:     proto.Int64(m.Node.MsgSeq),
-			SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
-			ReceiverId: proto.Int32(pInfo.id),
+			MsgSeq:   proto.Int64(m.Node.MsgSeq),
+			SenderId: proto.Int32(m.Node.PlayerInfo.GetId()),
+			// В сообщении о передаче мастерства ReceiverId содержит ID нового мастера (deputyId),
+			// а не ID получателя пакета — иначе каждый получатель будет считать себя новым MASTER.
+			ReceiverId: proto.Int32(deputyId),
 			Type: &pb.GameMessage_RoleChange{
 				RoleChange: &pb.GameMessage_RoleChangeMsg{
 					SenderRole:   pb.NodeRole_VIEWER.Enum(),
