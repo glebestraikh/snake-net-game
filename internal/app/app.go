@@ -1,4 +1,4 @@
-package mvc
+package app
 
 import (
 	"fyne.io/fyne/v2"
