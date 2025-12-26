@@ -246,6 +246,17 @@ func (m *Master) killSnake(crashedPlayerId, killer int32) {
 		for _, player := range m.players.Players {
 			if player.GetId() == crashedPlayerId {
 				wasDeputy = player.GetRole() == pb.NodeRole_DEPUTY
+				// Устанавливаем роль VIEWER для умершего игрока
+				player.Role = pb.NodeRole_VIEWER.Enum()
+
+				// Также обновляем в State.Players для синхронизации
+				for _, statePlayer := range m.Node.State.Players.GetPlayers() {
+					if statePlayer.GetId() == crashedPlayerId {
+						statePlayer.Role = pb.NodeRole_VIEWER.Enum()
+						break
+					}
+				}
+
 				// Сохраняем адрес для списка наблюдателей
 				addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
 				addr, err := net.ResolveUDPAddr("udp", addrStr)
@@ -378,6 +389,9 @@ func (m *Master) transferMasterToDeputy() {
 	// Это предотвращает отправку промежуточных некорректных состояний
 	deputy.Role = pb.NodeRole_MASTER.Enum()
 
+	// Метим игру как недоступную на этом узле (на всякий случай)
+	m.announcement.CanJoin = proto.Bool(false)
+
 	// Останавливаем работу этого MASTER (он теперь наблюдатель)
 	log.Printf("Old MASTER becoming VIEWER observer, stopping master duties\n")
 
@@ -396,21 +410,42 @@ func (m *Master) transferMasterToDeputy() {
 	m.Node.Cond.Broadcast()
 	m.Node.Mu.Unlock()
 
-	// Отправляем RoleChangeMsg новому MASTER
-	roleChangeMsg := &pb.GameMessage{
-		MsgSeq:     proto.Int64(m.Node.MsgSeq),
-		SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
-		ReceiverId: proto.Int32(deputyId),
-		Type: &pb.GameMessage_RoleChange{
-			RoleChange: &pb.GameMessage_RoleChangeMsg{
-				SenderRole:   pb.NodeRole_VIEWER.Enum(),
-				ReceiverRole: pb.NodeRole_MASTER.Enum(),
-			},
-		},
+	// Собираем адреса всех игроков для уведомления
+	// Мы уведомляем ВСЕХ игроков о том, что новый мастер теперь DEPUTY,
+	// и что мы сами стали VIEWER. Это позволит игрокам сразу переключиться.
+	var playersToNotify []struct {
+		addr *net.UDPAddr
+		id   int32
+	}
+	for _, p := range m.players.Players {
+		if p.GetId() == m.Node.PlayerInfo.GetId() {
+			continue
+		}
+		addrStr := fmt.Sprintf("%s:%d", p.GetIpAddress(), p.GetPort())
+		if a, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
+			playersToNotify = append(playersToNotify, struct {
+				addr *net.UDPAddr
+				id   int32
+			}{a, p.GetId()})
+		}
 	}
 
-	m.Node.SendMessage(roleChangeMsg, deputyAddr)
-	log.Printf("Sent RoleChange to new MASTER (player ID: %d)\n", deputyId)
+	for _, pInfo := range playersToNotify {
+		roleChangeMsg := &pb.GameMessage{
+			MsgSeq:     proto.Int64(m.Node.MsgSeq),
+			SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
+			ReceiverId: proto.Int32(pInfo.id),
+			Type: &pb.GameMessage_RoleChange{
+				RoleChange: &pb.GameMessage_RoleChangeMsg{
+					SenderRole:   pb.NodeRole_VIEWER.Enum(),
+					ReceiverRole: pb.NodeRole_MASTER.Enum(), // Для всех игроков Receiver (Deputy) теперь Master
+				},
+			},
+		}
+
+		m.Node.SendMessage(roleChangeMsg, pInfo.addr)
+		log.Printf("Sent RoleChange (New Master ID: %d) to player ID: %d at %v", deputyId, pInfo.id, pInfo.addr)
+	}
 
 	// Закрываем stopChan чтобы остановить управляющие горутины окончательно
 	close(m.stopChan)

@@ -19,6 +19,7 @@ type DiscoveredGame struct {
 	GameName        string
 	AnnouncementMsg *pb.GameMessage_AnnouncementMsg
 	MasterAddr      *net.UDPAddr
+	LastSeen        time.Time // Время последнего получения объявления
 }
 
 type Player struct {
@@ -177,22 +178,39 @@ func (p *Player) handleMulticastMessage(msg *pb.GameMessage, addr *net.UDPAddr) 
 
 func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.UDPAddr, announcementMsg *pb.GameMessage_AnnouncementMsg) {
 	// Проверяем, есть ли уже игра от этого мастера (по адресу)
-	// Определяем мастер-адрес из объявления, если он там указан
+	// Ищем МАСТЕРА в списке игроков для определения адреса.
+	// Это критически важно для совместимости, так как мастер не всегда первый в списке.
 	var masterAddr *net.UDPAddr
-	if announcement != nil && announcement.GetPlayers() != nil && len(announcement.GetPlayers().GetPlayers()) > 0 {
-		masterPlayer := announcement.GetPlayers().GetPlayers()[0]
-		if masterPlayer != nil && masterPlayer.GetIpAddress() != "" && masterPlayer.GetPort() != 0 {
-			addrStr := fmt.Sprintf("%s:%d", masterPlayer.GetIpAddress(), masterPlayer.GetPort())
-			if resolved, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
-				masterAddr = resolved
+	if announcement != nil && announcement.GetPlayers() != nil {
+		for _, player := range announcement.GetPlayers().GetPlayers() {
+			if player.GetRole() == pb.NodeRole_MASTER {
+				if player.GetIpAddress() != "" && player.GetPort() != 0 {
+					addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
+					if resolved, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
+						masterAddr = resolved
+						break
+					}
+				}
+			}
+		}
+		// Если по ролям не нашли, пробуем по старинке (первый в списке)
+		if masterAddr == nil && len(announcement.GetPlayers().GetPlayers()) > 0 {
+			masterPlayer := announcement.GetPlayers().GetPlayers()[0]
+			if masterPlayer != nil && masterPlayer.GetIpAddress() != "" && masterPlayer.GetPort() != 0 {
+				addrStr := fmt.Sprintf("%s:%d", masterPlayer.GetIpAddress(), masterPlayer.GetPort())
+				if resolved, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
+					masterAddr = resolved
+				}
 			}
 		}
 	}
-	// если не получилось получить адрес из объявления — используем источник пакета
+	// если не получилось получить адрес из самого объявления — используем источник пакета
 	if masterAddr == nil && addr != nil {
 		masterAddr = addr
 	}
 
+	p.Node.Mu.Lock()
+	defer p.Node.Mu.Unlock()
 	for i, game := range p.DiscoveredGames {
 		if game.MasterAddr != nil && masterAddr != nil && game.MasterAddr.String() == masterAddr.String() {
 			// Обновляем информацию об игре от этого мастера
@@ -202,6 +220,7 @@ func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.
 			p.DiscoveredGames[i].GameName = announcement.GetGameName()
 			p.DiscoveredGames[i].AnnouncementMsg = announcementMsg
 			p.DiscoveredGames[i].MasterAddr = masterAddr
+			p.DiscoveredGames[i].LastSeen = time.Now()
 			return
 		}
 	}
@@ -213,6 +232,7 @@ func (p *Player) addDiscoveredGame(announcement *pb.GameAnnouncement, addr *net.
 		GameName:        announcement.GetGameName(),
 		AnnouncementMsg: announcementMsg,
 		MasterAddr:      masterAddr,
+		LastSeen:        time.Now(),
 	}
 
 	p.DiscoveredGames = append(p.DiscoveredGames, newGame)
@@ -407,11 +427,11 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		log.Printf("Received error message: %s", errorMsg)
 		return
 	case *pb.GameMessage_RoleChange:
-		p.handleRoleChangeMessage(msg)
+		p.handleRoleChangeMessage(msg, addr)
 		p.Node.Mu.Unlock()
 		p.Node.SendAck(msg, addr)
 		return
-	case *pb.GameMessage_Ping:
+	case *pb.GameMessage_Ping, *pb.GameMessage_Steer, *pb.GameMessage_Join:
 		// Отправляем AckMsg в ответ БЕЗ мьютекса
 		p.Node.Mu.Unlock()
 		p.Node.SendAck(msg, addr)
@@ -419,6 +439,32 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 	default:
 		log.Printf("Received unknown message")
 		p.Node.Mu.Unlock()
+	}
+}
+
+// discoverGamesLoop удаляет игры, от которых давно не было объявлений
+func (p *Player) discoverGamesLoop() {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopChan:
+			return
+		case <-ticker.C:
+			p.Node.Mu.Lock()
+			var activeGames []DiscoveredGame
+			for _, game := range p.DiscoveredGames {
+				if time.Since(game.LastSeen) < 5*time.Second {
+					activeGames = append(activeGames, game)
+				} else {
+					log.Printf("Removing stale game: '%s' from %v (last seen %v ago)",
+						game.GameName, game.MasterAddr, time.Since(game.LastSeen))
+				}
+			}
+			p.DiscoveredGames = activeGames
+			p.Node.Mu.Unlock()
+		}
 	}
 }
 
@@ -660,7 +706,9 @@ func (p *Player) redirectUnconfirmedMessages(oldAddr, newAddr *net.UDPAddr) {
 
 func (p *Player) becomeMaster() {
 	p.becomingMaster.Do(func() {
-		p.doBecomeMaster()
+		// Запускаем переход в отдельной горутине, чтобы избежать дедлока в p.wg.Wait()
+		// если becomeMaster вызван из receiveMessagesLoop.
+		go p.doBecomeMaster()
 	})
 }
 
@@ -670,6 +718,10 @@ func (p *Player) doBecomeMaster() {
 	// СНАЧАЛА отправляем сигнал остановки
 	close(p.stopChan)
 	log.Printf("Sent stop signal to all Player goroutines")
+
+	// Очищаем очередь неподтвержденных сообщений ПЕРЕД ожиданием завершения
+	// Это важно, чтобы новый мастер не пытался переотправлять старые сообщения игрока
+	p.Node.ClearUnconfirmedMessages()
 
 	// ПОТОМ устанавливаем короткий дедлайн, чтобы ReadFromUDP быстро вернулся с timeout
 	// и горутина могла проверить stopChan и завершиться

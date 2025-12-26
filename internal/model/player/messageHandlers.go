@@ -1,23 +1,26 @@
 package player
 
 import (
+	"fmt"
 	"google.golang.org/protobuf/proto"
 	"log"
+	"net"
 	pb "snake-net-game/pkg/proto"
 )
 
-func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
+func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 	roleChangeMsg := msg.GetRoleChange()
 
 	log.Printf("Player ID %d: Received RoleChangeMsg - senderId=%d, receiverId=%d, senderRole=%v, receiverRole=%v",
 		p.Node.PlayerInfo.GetId(), msg.GetSenderId(), msg.GetReceiverId(),
 		roleChangeMsg.GetSenderRole(), roleChangeMsg.GetReceiverRole())
 
-	// Проверяем - это сообщение для нас
-	// Если наш ID еще 0 (не установлен), пропускаем проверку - обработаем позже
-	// Если ID установлен, проверяем совпадение
-	if p.Node.PlayerInfo.GetId() != 0 && msg.GetReceiverId() != 0 && msg.GetReceiverId() != p.Node.PlayerInfo.GetId() {
-		// Это сообщение не для нас, игнорируем
+	// Проверяем - это сообщение для нас или уведомление о смене мастера
+	isForUs := p.Node.PlayerInfo.GetId() != 0 && msg.GetReceiverId() != 0 && msg.GetReceiverId() == p.Node.PlayerInfo.GetId()
+	isMasterHandover := roleChangeMsg.GetSenderRole() == pb.NodeRole_VIEWER && roleChangeMsg.GetReceiverRole() == pb.NodeRole_MASTER
+
+	if !isForUs && !isMasterHandover {
+		// Это сообщение не для нас и не критическое уведомление, игнорируем
 		log.Printf("Player ID %d: Ignoring RoleChange not for us (receiverId=%d, our ID=%d)",
 			p.Node.PlayerInfo.GetId(), msg.GetReceiverId(), p.Node.PlayerInfo.GetId())
 		return
@@ -25,7 +28,44 @@ func (p *Player) handleRoleChangeMessage(msg *pb.GameMessage) {
 
 	newRole := roleChangeMsg.GetReceiverRole()
 
-	// Обновляем роль игрока
+	// Если это уведомление о смене мастера, обновляем MasterAddr даже если сообщение не нашему ID
+	if isMasterHandover && !isForUs {
+		newMasterId := msg.GetReceiverId()
+		log.Printf("Player ID %d: Master handover detected (Sender ID %d -> Receiver ID %d)",
+			p.Node.PlayerInfo.GetId(), msg.GetSenderId(), newMasterId)
+
+		var newMasterAddr *net.UDPAddr
+		// Пытаемся найти адрес нового мастера
+		if p.Node.State != nil && p.Node.State.Players != nil {
+			for _, player := range p.Node.State.Players.Players {
+				if player.GetId() == newMasterId {
+					if player.GetIpAddress() != "" && player.GetPort() != 0 {
+						addrStr := fmt.Sprintf("%s:%d", player.GetIpAddress(), player.GetPort())
+						if resolved, err := net.ResolveUDPAddr("udp", addrStr); err == nil {
+							newMasterAddr = resolved
+							log.Printf("Found new Master address in state: %v", newMasterAddr)
+						}
+					}
+					break
+				}
+			}
+		}
+
+		// Если в состоянии нет, пробуем источник пакета (если это и есть новый мастер)
+		if newMasterAddr == nil && addr != nil && msg.GetSenderId() == newMasterId {
+			newMasterAddr = addr
+			log.Printf("Using packet source as new Master address: %v", newMasterAddr)
+		}
+
+		if newMasterAddr != nil {
+			p.MasterAddr = newMasterAddr
+			p.Node.MasterAddr = newMasterAddr
+			log.Printf("Player ID %d: Switched MasterAddr to %v due to handover", p.Node.PlayerInfo.GetId(), newMasterAddr)
+		}
+		return
+	}
+
+	// Обновляем роль игрока (если сообщение для нас)
 	p.Node.PlayerInfo.Role = newRole.Enum()
 	log.Printf("Player ID %d: Updated PlayerInfo.Role to %v", p.Node.PlayerInfo.GetId(), newRole)
 

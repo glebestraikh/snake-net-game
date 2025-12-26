@@ -167,8 +167,8 @@ func (n *Node) SendAck(msg *pb.GameMessage, addr *net.UDPAddr) {
 
 // GetPlayerIdByAddress id игрока по адресу
 func (n *Node) GetPlayerIdByAddress(addr *net.UDPAddr) int32 {
-	if n.State == nil {
-		return 1
+	if n.State == nil || addr == nil {
+		return 0
 	}
 
 	// Exact match first

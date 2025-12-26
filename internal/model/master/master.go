@@ -153,11 +153,12 @@ func (m *Master) sendAnnouncementMessage() {
 			log.Printf("Master sendAnnouncementMessage stopped")
 			return
 		case <-ticker.C:
-			// Проверяем флаг stopped перед отправкой
+			// Проверяем флаг stopped и текущую роль перед отправкой
 			m.Node.Mu.Lock()
-			if m.stopped {
+			currentRole := m.Node.PlayerInfo.GetRole()
+			if m.stopped || currentRole != pb.NodeRole_MASTER {
 				m.Node.Mu.Unlock()
-				log.Printf("Master sendAnnouncementMessage stopped (stopped flag)")
+				log.Printf("Master sendAnnouncementMessage stopped (stopped flag or transition to %v)", currentRole)
 				return
 			}
 			m.Node.Mu.Unlock()
@@ -362,7 +363,14 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		m.Node.SendAck(msg, addr)
 
 	case *pb.GameMessage_Ping:
-		m.Node.SendAck(msg, addr)
+		m.Node.Mu.Lock()
+		currentRole := m.Node.PlayerInfo.GetRole()
+		m.Node.Mu.Unlock()
+		if currentRole == pb.NodeRole_MASTER {
+			m.Node.SendAck(msg, addr)
+		} else {
+			log.Printf("Ignoring PingMsg in %v mode", currentRole)
+		}
 
 	case *pb.GameMessage_Ack:
 		// Используем non-blocking write в AckChan чтобы избежать дедлока при переполнении
