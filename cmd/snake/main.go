@@ -1,10 +1,10 @@
 package main
 
 import (
-	"snake-net-game/internal/mvc"
+	"snake-net-game/internal/app"
 )
 
 func main() {
-	application := mvc.NewApp()
+	application := app.NewApp()
 	application.Run()
 }
