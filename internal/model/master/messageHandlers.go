@@ -67,7 +67,7 @@ func (m *Master) handleJoinMessage(msgSeq int64, joinMsg *pb.GameMessage_JoinMsg
 
 	ackMsg := &pb.GameMessage{
 		MsgSeq:     proto.Int64(msgSeq),
-		SenderId:   proto.Int32(1),
+		SenderId:   proto.Int32(m.Node.PlayerInfo.GetId()),
 		ReceiverId: proto.Int32(newPlayerID),
 		Type: &pb.GameMessage_Ack{
 			Ack: &pb.GameMessage_AckMsg{},
@@ -83,26 +83,15 @@ func (m *Master) handleJoinMessage(msgSeq int64, joinMsg *pb.GameMessage_JoinMsg
 		ReceiverId: proto.Int32(newPlayerID),
 		Type: &pb.GameMessage_State{
 			State: &pb.GameMessage_StateMsg{
-				State: &pb.GameState{
-					StateOrder: proto.Int32(m.Node.State.GetStateOrder()),
-					Snakes:     m.Node.State.GetSnakes(),
-					Foods:      m.Node.State.GetFoods(),
-					Players:    m.Node.State.GetPlayers(),
-				},
+				State: common.CompressGameState(m.Node.State, m.Node.Config),
 			},
 		},
 	}
 	m.Node.Mu.Unlock()
 
-	// Compress snake points into key-points format expected by Kotlin UI
-	for _, snake := range stateMsg.GetType().(*pb.GameMessage_State).State.GetState().GetSnakes() {
-		compressed := common.CompressSnake(snake, m.Node.Config.GetWidth(), m.Node.Config.GetHeight())
-		snake.Points = compressed.GetPoints()
-	}
-
 	m.Node.SendMessage(stateMsg, addr)
 
-	log.Printf("New player joined, ID: %v, sent initial state", newPlayer)
+	log.Printf("New player joined, ID: %v, sent initial state", newPlayerID)
 }
 
 // назначение заместителя

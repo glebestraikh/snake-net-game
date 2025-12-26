@@ -81,6 +81,13 @@ func (n *Node) StopNodeGoroutines() {
 	close(n.stopChan)
 }
 
+// ResetForRestart сбрасывает флаг stopped и пересоздает stopChan для перезапуска горутин
+func (n *Node) ResetForRestart() {
+	n.stopped.Store(false)
+	n.stopChan = make(chan struct{})
+	log.Printf("Node reset for restart (stopped=false, new stopChan created)")
+}
+
 // WaitForGoroutines ожидает завершения всех горутин Node
 func (n *Node) WaitForGoroutines() {
 	n.wg.Wait()

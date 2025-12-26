@@ -37,6 +37,8 @@ type Player struct {
 
 	stopChan chan struct{}  // канал для остановки горутин при переходе в MASTER
 	wg       sync.WaitGroup // для отслеживания завершения горутин Player
+
+	becomingMaster sync.Once // гарантирует переход в MASTER только один раз
 }
 
 func NewPlayer(multicastConn *net.UDPConn) *Player {
@@ -283,7 +285,12 @@ func (p *Player) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 			log.Printf("Joined game with ID: %d", p.Node.PlayerInfo.GetId())
 			p.haveId = true
 		}
-		p.Node.AckChan <- msg.GetMsgSeq()
+		// Используем non-blocking write в AckChan чтобы избежать дедлока при переполнении
+		select {
+		case p.Node.AckChan <- msg.GetMsgSeq():
+		default:
+			log.Printf("Warning: Player AckChan full, dropping ACK info for msg seq %d", msg.GetMsgSeq())
+		}
 		p.Node.Mu.Unlock()
 		return
 	case *pb.GameMessage_Announcement:
@@ -652,7 +659,13 @@ func (p *Player) redirectUnconfirmedMessages(oldAddr, newAddr *net.UDPAddr) {
 }
 
 func (p *Player) becomeMaster() {
-	log.Printf("DEPUTY becoming new MASTER")
+	p.becomingMaster.Do(func() {
+		p.doBecomeMaster()
+	})
+}
+
+func (p *Player) doBecomeMaster() {
+	log.Printf("DEPUTY becoming new MASTER (idempotent)")
 
 	// СНАЧАЛА отправляем сигнал остановки
 	close(p.stopChan)
@@ -698,120 +711,83 @@ func (p *Player) becomeMaster() {
 		log.Printf("WARNING: Timeout waiting for Node goroutines to finish, proceeding anyway")
 	}
 
-	// Очищаем очередь неподтвержденных сообщений
+	// Reset Node state so it can be used for Master duties
+	// This clears the stopped flag and creates a new stopChan
+	p.Node.ResetStopChan()
+
+	// Очищаем очередь неподтвержденных сообщений и AckChan
 	p.Node.Mu.Lock()
 	log.Printf("Clearing %d unconfirmed messages", p.Node.UnconfirmedMessages())
 	p.Node.ClearUnconfirmedMessages()
 
-	// Очищаем AckChan от всех оставшихся сообщений
 	for len(p.Node.AckChan) > 0 {
 		<-p.Node.AckChan
 	}
 	p.Node.Mu.Unlock()
 
-	log.Printf("All old goroutines stopped and cleaned up")
+	log.Printf("Internal Node state reset for MASTER duties")
 
-	// Обновляем роль игрока
+	// Обновляем роль
 	p.Node.Mu.Lock()
 	p.Node.PlayerInfo.Role = pb.NodeRole_MASTER.Enum()
-	p.Node.Role = pb.NodeRole_MASTER // Также обновляем Node.Role!
+	p.Node.Role = pb.NodeRole_MASTER
 
-	// Удаляем старого мастера из списка игроков и змеек
-	var updatedPlayers []*pb.GamePlayer
-	var updatedSnakes []*pb.GameState_Snake
+	// Находим старого мастера для корректного перехода
 	oldMasterId := int32(-1)
-
-	for _, player := range p.Node.State.Players.Players {
-		if player.GetRole() == pb.NodeRole_MASTER && player.GetId() != p.Node.PlayerInfo.GetId() {
-			oldMasterId = player.GetId()
-			// НЕ удаляем старого MASTER! Меняем его роль на VIEWER
-			// чтобы он продолжал получать StateMsg и видеть игру
-			player.Role = pb.NodeRole_VIEWER.Enum()
-			// Инициализируем LastInteraction для старого MASTER-VIEWER
-			// чтобы работала проверка таймаута, если он отключится
-			p.Node.LastInteraction[oldMasterId] = time.Now()
-			log.Printf("Changed old MASTER (player ID: %d) role to VIEWER in game state and initialized LastInteraction", oldMasterId)
+	if p.Node.State != nil && p.Node.State.Players != nil {
+		for _, player := range p.Node.State.Players.Players {
+			if player.GetRole() == pb.NodeRole_MASTER && player.GetId() != p.Node.PlayerInfo.GetId() {
+				oldMasterId = player.GetId()
+				// Переводим старого мастера в VIEWER
+				player.Role = pb.NodeRole_VIEWER.Enum()
+				log.Printf("Old MASTER (ID: %d) found in state, set to VIEWER", oldMasterId)
+			}
+			if player.GetId() == p.Node.PlayerInfo.GetId() {
+				player.Role = pb.NodeRole_MASTER.Enum()
+			}
 		}
-		if player.GetId() == p.Node.PlayerInfo.GetId() {
-			player.Role = pb.NodeRole_MASTER.Enum()
+
+		// Чистим змеек и помечаем нашу как живую
+		var updatedSnakes []*pb.GameState_Snake
+		for _, snake := range p.Node.State.Snakes {
+			if snake.GetPlayerId() == oldMasterId {
+				continue // Удаляем змею старого мастера
+			}
+			if snake.GetPlayerId() == p.Node.PlayerInfo.GetId() {
+				snake.State = pb.GameState_Snake_ALIVE.Enum()
+			}
+			updatedSnakes = append(updatedSnakes, snake)
 		}
-		updatedPlayers = append(updatedPlayers, player)
-	}
+		p.Node.State.Snakes = updatedSnakes
 
-	// Удаляем змейку старого мастера и убеждаемся что наша змейка ALIVE
-	for _, snake := range p.Node.State.Snakes {
-		if snake.GetPlayerId() == oldMasterId {
-			continue // Пропускаем змейку старого мастера
+		if oldMasterId != -1 {
+			delete(p.Node.LastInteraction, oldMasterId)
 		}
-		// Убеждаемся что наша змейка остаётся ALIVE
-		if snake.GetPlayerId() == p.Node.PlayerInfo.GetId() {
-			snake.State = pb.GameState_Snake_ALIVE.Enum()
-			log.Printf("Ensured our snake (player ID: %d) is ALIVE", p.Node.PlayerInfo.GetId())
-		}
-		updatedSnakes = append(updatedSnakes, snake)
 	}
 
-	p.Node.State.Players.Players = updatedPlayers
-	p.Node.State.Snakes = updatedSnakes
-
-	// Логируем текущее состояние для отладки
-	log.Printf("After cleanup: %d players, %d snakes", len(updatedPlayers), len(updatedSnakes))
-	for _, snake := range updatedSnakes {
-		log.Printf("Snake for player %d: state=%v", snake.GetPlayerId(), snake.GetState())
-	}
-
-	// Удаляем старого MASTER из LastInteraction (если он был)
-	if oldMasterId != -1 {
-		delete(p.Node.LastInteraction, oldMasterId)
-		log.Printf("Removed old MASTER (ID: %d) from LastInteraction", oldMasterId)
-
-		// Инициализируем LastInteraction для старого MASTER-VIEWER с текущим временем
-		// чтобы работала проверка таймаута
-		p.Node.LastInteraction[oldMasterId] = time.Now()
-		log.Printf("Initialized LastInteraction for old MASTER-VIEWER (ID: %d)", oldMasterId)
-	}
-
-	// Удаляем старого мастера из LastSent, если его адрес там есть
-	if oldMasterId != -1 && p.MasterAddr != nil {
-		oldMasterKey := p.MasterAddr.String()
-		delete(p.Node.LastSent, oldMasterKey)
-		log.Printf("Removed old MASTER address %s from LastSent", oldMasterKey)
-	}
-
-	// НЕ очищаем полностью LastInteraction и LastSent!
-	// Они содержат информацию об остальных игроках, которая нужна для корректной работы
-	log.Printf("Kept existing LastInteraction entries for %d players", len(p.Node.LastInteraction))
-	log.Printf("Kept existing LastSent entries for %d addresses", len(p.Node.LastSent))
-
-	// Очищаем MasterAddr - мы теперь сами мастер
+	// Мы теперь сами мастер
 	p.Node.MasterAddr = nil
 	p.MasterAddr = nil
-	log.Printf("Cleared MasterAddr")
 
-	// Создаем новый канал остановки и AckChan для Master
-	p.Node.ResetStopChan()
-	p.Node.AckChan = make(chan int64, 100)
-
-	// Извлекаем название игры из AnnouncementMsg
-	gameName := "Game1" // дефолтное значение
-	if p.AnnouncementMsg != nil && len(p.AnnouncementMsg.Games) > 0 {
-		gameName = p.AnnouncementMsg.Games[0].GetGameName()
-		log.Printf("Preserving original game name: '%s'", gameName)
-	}
-
-	// Создаем структуру Master из текущего Player
-	newMaster := master.NewMasterFromPlayer(p.Node, p.Node.State.Players, p.LastStateMsg, gameName)
+	// ОЧЕНЬ ВАЖНО: уведомляем UI
+	p.Node.Cond.Broadcast()
 	p.Node.Mu.Unlock()
 
-	log.Printf("Player %d is now MASTER, starting master functions", p.Node.PlayerInfo.GetId())
+	// Определяем название игры
+	gameName := "Game1"
+	if p.AnnouncementMsg != nil && len(p.AnnouncementMsg.Games) > 0 {
+		gameName = p.AnnouncementMsg.Games[0].GetGameName()
+	}
 
-	// Отправляем RoleChangeMsg всем игрокам о смене MASTER
+	newMaster := master.NewMasterFromPlayer(p.Node, p.Node.State.Players, p.LastStateMsg, gameName)
+	log.Printf("Player %d transitioned to MASTER role. Game name: %s", p.Node.PlayerInfo.GetId(), gameName)
+
+	// Уведомляем остальных
 	p.notifyPlayersAboutNewMaster()
 
-	// Запускаем все функции мастера
+	// Поехали!
 	newMaster.Start()
-
-	log.Printf("Master started successfully")
+	log.Printf("Master duties started successfuly")
 }
 
 // notifyPlayersAboutNewMaster уведомляет всех игроков о смене MASTER
@@ -831,11 +807,6 @@ func (p *Player) notifyPlayersAboutNewMaster() {
 	for _, player := range p.Node.State.Players.Players {
 		// Пропускаем себя
 		if player.GetId() == p.Node.PlayerInfo.GetId() {
-			continue
-		}
-		// Пропускаем старого мастера (у него была роль MASTER до смены)
-		if player.GetRole() == pb.NodeRole_MASTER {
-			log.Printf("Skipping old MASTER (player ID: %d) in notifications", player.GetId())
 			continue
 		}
 

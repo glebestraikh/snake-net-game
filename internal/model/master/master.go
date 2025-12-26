@@ -349,7 +349,12 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		m.Node.SendAck(msg, addr)
 
 	case *pb.GameMessage_Ack:
-		m.Node.AckChan <- msg.GetMsgSeq()
+		// Используем non-blocking write в AckChan чтобы избежать дедлока при переполнении
+		select {
+		case m.Node.AckChan <- msg.GetMsgSeq():
+		default:
+			log.Printf("Warning: Master AckChan full, dropping ACK info for msg seq %d", msg.GetMsgSeq())
+		}
 
 	case *pb.GameMessage_State:
 		stateOrder := t.State.GetState().GetStateOrder()
