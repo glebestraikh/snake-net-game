@@ -24,7 +24,7 @@ func NewApp() *App {
 	// Применяем кастомную тему
 	myApp.Settings().SetTheme(&view.CustomTheme{})
 
-	myWindow := myApp.NewWindow("🐍 Snake Game - Multiplayer")
+	myWindow := myApp.NewWindow("Snake Game - Multiplayer")
 	myWindow.Resize(fyne.NewSize(900, 650))
 	myWindow.CenterOnScreen()
 
