@@ -13,13 +13,11 @@ import (
 	"strconv"
 )
 
-// GameConfigView представляет экран настройки игры
 type GameConfigView struct {
 	window     fyne.Window
 	controller *controller.GameController
 }
 
-// NewGameConfigView создает новое представление конфигурации
 func NewGameConfigView(window fyne.Window, controller *controller.GameController) *GameConfigView {
 	return &GameConfigView{
 		window:     window,
@@ -27,10 +25,8 @@ func NewGameConfigView(window fyne.Window, controller *controller.GameController
 	}
 }
 
-// Show отображает настройки игры
 func (gcv *GameConfigView) Show() {
-	// Заголовок
-	title := canvas.NewText("⚙️ Настройки новой игры", color.White)
+	title := canvas.NewText("Настройки новой игры", color.White)
 	title.TextSize = 28
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	title.Alignment = fyne.TextAlignCenter
@@ -39,7 +35,6 @@ func (gcv *GameConfigView) Show() {
 	subtitle.TextSize = 14
 	subtitle.Alignment = fyne.TextAlignCenter
 
-	// Поля ввода с предустановленными значениями
 	gameNameEntry := widget.NewEntry()
 	gameNameEntry.SetText("Моя игра")
 	gameNameEntry.SetPlaceHolder("Введите название игры")
@@ -60,11 +55,9 @@ func (gcv *GameConfigView) Show() {
 	delayEntry.SetText("180")
 	delayEntry.SetPlaceHolder("100-3000")
 
-	// Создаем стилизованную форму
 	formCard := gcv.createFormCard(gameNameEntry, widthEntry, heightEntry, foodEntry, delayEntry)
 
-	// Кнопки
-	startButton := widget.NewButton("🎮 Начать игру", func() {
+	startButton := widget.NewButton("Начать игру", func() {
 		gameName := gameNameEntry.Text
 		if gameName == "" {
 			gameName = "Игра без названия"
@@ -86,12 +79,11 @@ func (gcv *GameConfigView) Show() {
 	})
 	startButton.Importance = widget.HighImportance
 
-	backButton := widget.NewButton("⬅️ Назад", func() {
+	backButton := widget.NewButton("Назад", func() {
 		mainView := NewMainView(gcv.window, gcv.controller)
 		mainView.ShowMainMenu()
 	})
 
-	// Компонуем элементы
 	content := container.NewVBox(
 		layout.NewSpacer(),
 		container.NewCenter(title),
@@ -111,14 +103,12 @@ func (gcv *GameConfigView) Show() {
 	gcv.window.SetContent(container.NewPadded(content))
 }
 
-// createFormCard создает карточку с полями формы
 func (gcv *GameConfigView) createFormCard(gameNameEntry, widthEntry, heightEntry, foodEntry, delayEntry *widget.Entry) *fyne.Container {
 	cardBg := canvas.NewRectangle(CardBackground)
 	cardBg.CornerRadius = 10
 
 	formItems := container.NewVBox()
 
-	// Название игры
 	gameNameLabel := canvas.NewText("Название игры", color.White)
 	gameNameLabel.TextStyle = fyne.TextStyle{Bold: true}
 	gameNameDesc := widget.NewLabel("Название вашей игры для отображения в списке")
@@ -128,7 +118,6 @@ func (gcv *GameConfigView) createFormCard(gameNameEntry, widthEntry, heightEntry
 	formItems.Add(gameNameDesc)
 	formItems.Add(widget.NewSeparator())
 
-	// Ширина поля
 	widthLabel := canvas.NewText("Ширина поля", color.White)
 	widthLabel.TextStyle = fyne.TextStyle{Bold: true}
 	widthDesc := widget.NewLabel("Количество клеток по горизонтали")
@@ -138,7 +127,6 @@ func (gcv *GameConfigView) createFormCard(gameNameEntry, widthEntry, heightEntry
 	formItems.Add(widthDesc)
 	formItems.Add(widget.NewSeparator())
 
-	// Высота поля
 	heightLabel := canvas.NewText("Высота поля", color.White)
 	heightLabel.TextStyle = fyne.TextStyle{Bold: true}
 	heightDesc := widget.NewLabel("Количество клеток по вертикали")
@@ -148,7 +136,6 @@ func (gcv *GameConfigView) createFormCard(gameNameEntry, widthEntry, heightEntry
 	formItems.Add(heightDesc)
 	formItems.Add(widget.NewSeparator())
 
-	// Количество еды
 	foodLabel := canvas.NewText("Количество еды", color.White)
 	foodLabel.TextStyle = fyne.TextStyle{Bold: true}
 	foodDesc := widget.NewLabel("Статическое количество еды на поле")
@@ -158,7 +145,6 @@ func (gcv *GameConfigView) createFormCard(gameNameEntry, widthEntry, heightEntry
 	formItems.Add(foodDesc)
 	formItems.Add(widget.NewSeparator())
 
-	// Задержка
 	delayLabel := canvas.NewText("Задержка (мс)", color.White)
 	delayLabel.TextStyle = fyne.TextStyle{Bold: true}
 	delayDesc := widget.NewLabel("Задержка между ходами в миллисекундах")
