@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-// PlayerGameView представляет экран игры для игрока
 type PlayerGameView struct {
 	window       fyne.Window
 	controller   *controller.GameController
@@ -27,7 +26,6 @@ type PlayerGameView struct {
 	roleLabel    *widget.Label
 }
 
-// NewPlayerGameView создает новое представление игры игрока
 func NewPlayerGameView(window fyne.Window, controller *controller.GameController, playerNode *player.Player, playerName string, selectedGame *player.DiscoveredGame, isViewer bool) *PlayerGameView {
 	return &PlayerGameView{
 		window:       window,
@@ -40,7 +38,6 @@ func NewPlayerGameView(window fyne.Window, controller *controller.GameController
 	}
 }
 
-// Show отображает экран игры игрока
 func (pgv *PlayerGameView) Show() {
 	pgv.controller.JoinGame(pgv.playerNode, pgv.playerName, pgv.selectedGame, pgv.isViewer)
 
@@ -52,18 +49,15 @@ func (pgv *PlayerGameView) Show() {
 
 	pgv.infoPanel = NewInfoPanel(pgv.playerNode.Node.Config,
 		func() {
-			// Главное меню
 			pgv.controller.StopGameLoop()
 			mainView := NewMainView(pgv.window, pgv.controller)
 			mainView.ShowMainMenu()
 		},
 		func() {
-			// Выход из приложения
 			pgv.controller.StopGameLoop()
 			pgv.window.Close()
 		},
 		func() {
-			// Стать наблюдателем
 			pgv.controller.BecomeViewerForPlayer(pgv.playerNode)
 		},
 		pgv.scoreLabel, pgv.nameLabel, pgv.roleLabel, pgv.isViewer)
@@ -82,7 +76,6 @@ func (pgv *PlayerGameView) Show() {
 func (pgv *PlayerGameView) startGameLoop(gameContent *fyne.Container) {
 	rand.NewSource(time.Now().UnixNano())
 
-	// Обработка клавиш
 	pgv.window.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
 		pgv.controller.HandleKeyInputForPlayer(e, pgv.playerNode)
 	})

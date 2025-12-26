@@ -11,7 +11,6 @@ import (
 	pb "snake-net-game/pkg/proto"
 )
 
-// InfoPanel представляет информационную панель
 type InfoPanel struct {
 	container          *fyne.Container
 	scoreTable         *widget.Table
@@ -21,7 +20,6 @@ type InfoPanel struct {
 	isViewer           bool // Флаг, если пользователь присоединился как VIEWER
 }
 
-// NewInfoPanel создает новую информационную панель
 func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBecomeViewer func(), scoreLabel *widget.Label, nameLabel *widget.Label, roleLabel *widget.Label, isViewer bool) *InfoPanel {
 	panel := &InfoPanel{
 		tableData: [][]string{
@@ -30,7 +28,6 @@ func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBec
 		isViewer: isViewer,
 	}
 
-	// Таблица со счетом
 	panel.scoreTable = widget.NewTable(
 		func() (int, int) {
 			if len(panel.tableData) == 0 {
@@ -61,40 +58,35 @@ func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBec
 	scrollableTable := container.NewScroll(panel.scoreTable)
 	scrollableTable.SetMinSize(fyne.NewSize(200, 250))
 
-	// Стилизация меток
 	scoreLabel.TextStyle = fyne.TextStyle{Bold: true}
 	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
 	roleLabel.TextStyle = fyne.TextStyle{Bold: true}
 
-	// Информационная карточка
-	gameInfoTitle := canvas.NewText("📊 Информация об игре", color.White)
+	gameInfoTitle := canvas.NewText("Информация об игре", color.White)
 	gameInfoTitle.TextSize = 16
 	gameInfoTitle.TextStyle = fyne.TextStyle{Bold: true}
 
 	gameInfo := widget.NewLabel(fmt.Sprintf("Размер поля: %dx%d", config.GetWidth(), config.GetHeight()))
-	panel.foodCountLabel = widget.NewLabel("🍎 Еда: 0")
+	panel.foodCountLabel = widget.NewLabel("Еда: 0")
 	panel.foodCountLabel.TextStyle = fyne.TextStyle{Bold: true}
 
-	// Карточки со статистикой
-	playerCard := panel.createStatsCard("👤 Игрок", container.NewVBox(scoreLabel, nameLabel, roleLabel))
-	leaderboardCard := panel.createStatsCard("🏆 Таблица лидеров", scrollableTable)
+	playerCard := panel.createStatsCard("Игрок", container.NewVBox(scoreLabel, nameLabel, roleLabel))
+	leaderboardCard := panel.createStatsCard("Таблица лидеров", scrollableTable)
 	gameInfoCard := panel.createStatsCard("", container.NewVBox(gameInfoTitle, gameInfo, panel.foodCountLabel))
 
-	// Кнопки
-	mainMenuButton := widget.NewButton("🏠 Главное меню", onMainMenu)
+	mainMenuButton := widget.NewButton("Главное меню", onMainMenu)
 	mainMenuButton.Importance = widget.HighImportance
 
-	becomeViewerButton := widget.NewButton("👁️ Стать наблюдателем", onBecomeViewer)
+	becomeViewerButton := widget.NewButton("Стать наблюдателем", onBecomeViewer)
 	becomeViewerButton.Importance = widget.WarningImportance
-	// Скрываем кнопку по умолчанию и для VIEWER
 	if isViewer {
 		becomeViewerButton.Hide()
 	} else {
-		becomeViewerButton.Hide() // По умолчанию скрыта, показывается только для NORMAL
+		becomeViewerButton.Hide()
 	}
 	panel.becomeViewerButton = becomeViewerButton
 
-	exitButton := widget.NewButton("❌ Выйти", onExit)
+	exitButton := widget.NewButton("Выйти", onExit)
 	exitButton.Importance = widget.DangerImportance
 
 	panel.container = container.NewVBox(
@@ -112,7 +104,6 @@ func NewInfoPanel(config *pb.GameConfig, onMainMenu func(), onExit func(), onBec
 	return panel
 }
 
-// createStatsCard создает карточку со статистикой
 func (ip *InfoPanel) createStatsCard(title string, content fyne.CanvasObject) *fyne.Container {
 	cardBg := canvas.NewRectangle(CardBackground)
 	cardBg.CornerRadius = 10
@@ -136,66 +127,49 @@ func (ip *InfoPanel) createStatsCard(title string, content fyne.CanvasObject) *f
 	return container.NewStack(cardBg, cardContent)
 }
 
-// GetContainer возвращает контейнер панели
 func (ip *InfoPanel) GetContainer() *fyne.Container {
 	return ip.container
 }
 
-// GetScoreTable возвращает таблицу счета
 func (ip *InfoPanel) GetScoreTable() *widget.Table {
 	return ip.scoreTable
 }
 
-// GetFoodCountLabel возвращает метку количества еды
 func (ip *InfoPanel) GetFoodCountLabel() *widget.Label {
 	return ip.foodCountLabel
 }
 
-// FormatRole форматирует роль с эмодзи для красивого отображения
 func FormatRole(role pb.NodeRole) string {
 	switch role {
 	case pb.NodeRole_MASTER:
-		return "👑 Мастер"
+		return "Мастер"
 	case pb.NodeRole_DEPUTY:
-		return "🤡 Заместитель"
+		return "Заместитель"
 	case pb.NodeRole_VIEWER:
-		return "👁️ Наблюдатель"
+		return "Наблюдатель"
 	case pb.NodeRole_NORMAL:
-		return "🎮 Игрок"
+		return "Игрок"
 	default:
 		return fmt.Sprintf("%v", role)
 	}
 }
 
-// UpdateInfoPanel обновляет информационную панель
 func (ip *InfoPanel) UpdateInfoPanel(state *pb.GameState, playerRole pb.NodeRole) {
 	ip.tableData = [][]string{
 		{"Имя", "Счёт"},
 	}
 	for _, gamePlayer := range state.GetPlayers().GetPlayers() {
 		playerName := gamePlayer.GetName()
-		if gamePlayer.GetRole() == pb.NodeRole_MASTER {
-			playerName += " 👑"
-		}
-		if gamePlayer.GetRole() == pb.NodeRole_DEPUTY {
-			playerName += " 🤡"
-		}
-		if gamePlayer.GetRole() == pb.NodeRole_VIEWER {
-			playerName += " 👁️"
-		}
 		ip.tableData = append(ip.tableData, []string{playerName, fmt.Sprintf("%d", gamePlayer.GetScore())})
 	}
 
-	ip.foodCountLabel.SetText(fmt.Sprintf("🍎 Еда: %d", len(state.Foods)))
+	ip.foodCountLabel.SetText(fmt.Sprintf("Еда: %d", len(state.Foods)))
 
-	// Обновляем видимость кнопки "Стать наблюдателем"
-	// Кнопка доступна только для NORMAL игроков И если изначально не присоединялись как VIEWER
 	if playerRole == pb.NodeRole_NORMAL && !ip.isViewer {
 		ip.becomeViewerButton.Show()
 	} else {
 		ip.becomeViewerButton.Hide()
 	}
 
-	// ВАЖНО: Вызываем Refresh() чтобы UI обновился
 	ip.scoreTable.Refresh()
 }

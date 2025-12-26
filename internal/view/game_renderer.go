@@ -10,17 +10,14 @@ import (
 
 const CellSize = 24
 
-// GameRenderer отвечает за отрисовку игрового состояния
 type GameRenderer struct {
 	gameContent *fyne.Container
 }
 
-// NewGameRenderer создает новый рендерер игры
 func NewGameRenderer() *GameRenderer {
 	return &GameRenderer{}
 }
 
-// CreateGameContent создает холст
 func (gr *GameRenderer) CreateGameContent(config *pb.GameConfig) *fyne.Container {
 	gr.gameContent = container.NewWithoutLayout()
 
@@ -31,14 +28,11 @@ func (gr *GameRenderer) CreateGameContent(config *pb.GameConfig) *fyne.Container
 	return gr.gameContent
 }
 
-// RenderGameState выводит игру на экран с улучшенной графикой
 func (gr *GameRenderer) RenderGameState(content *fyne.Container, state *pb.GameState, config *pb.GameConfig) {
 	content.Objects = nil
 
-	// Игровое поле с шахматным паттерном
 	for i := int32(0); i < config.GetWidth(); i++ {
 		for j := int32(0); j < config.GetHeight(); j++ {
-			// Чередуем цвета для шахматного паттерна
 			var cellColor = GameFieldDark
 			if (i+j)%2 == 0 {
 				cellColor = GameFieldLight
@@ -54,42 +48,35 @@ func (gr *GameRenderer) RenderGameState(content *fyne.Container, state *pb.GameS
 		}
 	}
 
-	// Еда с эффектом свечения
 	for _, food := range state.Foods {
 		x := float32(food.GetX()) * CellSize
 		y := float32(food.GetY()) * CellSize
 
-		// Внешнее свечение
 		glow := canvas.NewCircle(FoodGlow)
 		glow.Resize(fyne.NewSize(CellSize+4, CellSize+4))
 		glow.Move(fyne.NewPos(x-2, y-2))
 		content.Add(glow)
 
-		// Сама еда
 		apple := canvas.NewCircle(FoodColor)
 		apple.Resize(fyne.NewSize(CellSize-4, CellSize-4))
 		apple.Move(fyne.NewPos(x+2, y+2))
 		content.Add(apple)
 	}
 
-	// Змеи с улучшенной графикой
 	for _, snake := range state.Snakes {
 		role := gr.getUserById(snake.GetPlayerId(), state)
 		if len(snake.Points) == 0 {
 			continue
 		}
 
-		// Первая точка - голова (абсолютные координаты)
 		currX := snake.Points[0].GetX()
 		currY := snake.Points[0].GetY()
 
 		log.Printf("Rendering snake %d: head=(%d,%d), role=%v, points=%d",
 			snake.GetPlayerId(), currX, currY, role, len(snake.Points))
 
-		// Отрисовка головы
 		gr.drawSnakePart(content, currX, currY, role, 0, true)
 
-		// Последующие точки - смещения
 		bodyPartIdx := 1
 		for i := 1; i < len(snake.Points); i++ {
 			dx := snake.Points[i].GetX()
@@ -107,14 +94,6 @@ func (gr *GameRenderer) RenderGameState(content *fyne.Container, state *pb.GameS
 			steps := absDX
 			if absDY > absDX {
 				steps = absDY
-			}
-
-			if steps > 100 { // ПРОВЕРКА НА АНОМАЛЬНО ДЛИННЫЕ ЗМЕЙКИ
-				log.Printf("WARNING: Anomalous segment length: snake=%d, segment=%d, dx=%d, dy=%d, steps=%d",
-					snake.GetPlayerId(), i, dx, dy, steps)
-				if steps > 1000 {
-					steps = 1000 // Лимит для предотвращения зависаний
-				}
 			}
 
 			for s := int32(0); s < steps; s++ {
@@ -140,13 +119,11 @@ func (gr *GameRenderer) RenderGameState(content *fyne.Container, state *pb.GameS
 	}
 }
 
-// drawSnakePart вспомогательная функция для отрисовки сегмента змеи
 func (gr *GameRenderer) drawSnakePart(content *fyne.Container, x, y int32, role pb.NodeRole, index int, isHead bool) {
 	posX := float32(x) * CellSize
 	posY := float32(y) * CellSize
 
 	if isHead {
-		// Голова змеи - более крупная и округлая
 		var headColor = MasterSnakeHead
 		switch role {
 		case pb.NodeRole_MASTER:
@@ -163,7 +140,6 @@ func (gr *GameRenderer) drawSnakePart(content *fyne.Container, x, y int32, role 
 		head.Move(fyne.NewPos(posX+1, posY+1))
 		content.Add(head)
 
-		// Глаза змеи
 		eye1 := canvas.NewCircle(GameFieldDark)
 		eye1.Resize(fyne.NewSize(4, 4))
 		eye1.Move(fyne.NewPos(posX+6, posY+6))
@@ -174,7 +150,6 @@ func (gr *GameRenderer) drawSnakePart(content *fyne.Container, x, y int32, role 
 		eye2.Move(fyne.NewPos(posX+14, posY+6))
 		content.Add(eye2)
 	} else {
-		// Тело змеи - градиент от головы к хвосту
 		var bodyColor = MasterSnakeBody
 		switch role {
 		case pb.NodeRole_MASTER:
@@ -185,7 +160,6 @@ func (gr *GameRenderer) drawSnakePart(content *fyne.Container, x, y int32, role 
 			bodyColor = DeputySnakeBody
 		}
 
-		// Уменьшаем размер к хвосту
 		sizeReduction := float32(index) * 0.3
 		if sizeReduction > 4 {
 			sizeReduction = 4
