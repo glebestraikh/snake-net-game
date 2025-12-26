@@ -374,9 +374,26 @@ func (m *Master) transferMasterToDeputy() {
 
 	log.Printf("Transferring MASTER role to DEPUTY (player ID: %d)", deputyId)
 
-	// Обновляем роль DEPUTY на MASTER
+	// ОБНОВЛЯЕМ РОЛИ АТОМАРНО
+	// Это предотвращает отправку промежуточных некорректных состояний
 	deputy.Role = pb.NodeRole_MASTER.Enum()
 
+	// Останавливаем работу этого MASTER (он теперь наблюдатель)
+	log.Printf("Old MASTER becoming VIEWER observer, stopping master duties\n")
+
+	// Устанавливаем новый адрес мастера (теперь это DEPUTY)
+	m.Node.MasterAddr = deputyAddr
+	// Меняем роль на VIEWER
+	m.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
+	// Устанавливаем флаг stopped, чтобы управляющие горутины (sendStateMessage) немедленно остановились
+	m.stopped = true
+
+	// Очищаем очередь неподтвержденных сообщений, так как мы больше не мастер
+	log.Printf("Clearing %d unconfirmed Master messages", m.Node.UnconfirmedMessages())
+	m.Node.ClearUnconfirmedMessages()
+
+	// ОЧЕНЬ ВАЖНО: уведомляем UI
+	m.Node.Cond.Broadcast()
 	m.Node.Mu.Unlock()
 
 	// Отправляем RoleChangeMsg новому MASTER
@@ -386,29 +403,16 @@ func (m *Master) transferMasterToDeputy() {
 		ReceiverId: proto.Int32(deputyId),
 		Type: &pb.GameMessage_RoleChange{
 			RoleChange: &pb.GameMessage_RoleChangeMsg{
-				SenderRole:   pb.NodeRole_DEPUTY.Enum(),
+				SenderRole:   pb.NodeRole_VIEWER.Enum(),
 				ReceiverRole: pb.NodeRole_MASTER.Enum(),
 			},
 		},
 	}
 
 	m.Node.SendMessage(roleChangeMsg, deputyAddr)
-	log.Printf("Sent RoleChange to new MASTER (player ID: %d)", deputyId)
+	log.Printf("Sent RoleChange to new MASTER (player ID: %d)\n", deputyId)
 
-	// Останавливаем работу этого MASTER (он теперь наблюдатель)
-	log.Printf("Old MASTER becoming VIEWER observer, stopping master duties but keeping message reception")
-
-	// Устанавливаем новый адрес мастера (теперь это DEPUTY)
-	m.Node.Mu.Lock()
-	m.Node.MasterAddr = deputyAddr
-	// Меняем роль на VIEWER ПЕРЕД закрытием stopChan
-	m.Node.PlayerInfo.Role = pb.NodeRole_VIEWER.Enum()
-	// Устанавливаем флаг stopped, чтобы управляющие горутины остановились
-	m.stopped = true
-	m.Node.Mu.Unlock()
-
-	// Закрываем stopChan чтобы остановить управляющие горутины
-	// receiveMessages проверит роль и продолжит работать если role == VIEWER
+	// Закрываем stopChan чтобы остановить управляющие горутины окончательно
 	close(m.stopChan)
 
 	log.Printf("Old MASTER successfully transitioned to VIEWER mode")

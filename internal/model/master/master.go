@@ -310,8 +310,12 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 	}
 	switch t := msg.Type.(type) {
 	case *pb.GameMessage_Join:
-		// проверяем есть ли место 5*5 для новой змеи
 		m.Node.Mu.Lock()
+		if m.stopped || m.Node.PlayerInfo.GetRole() != pb.NodeRole_MASTER {
+			m.Node.Mu.Unlock()
+			return
+		}
+		// проверяем есть ли место 5*5 для новой змеи
 		hasSquare, coord := m.hasFreeSquare(m.Node.State, m.Node.Config, 5)
 		m.Node.Mu.Unlock()
 
@@ -327,9 +331,21 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		}
 
 	case *pb.GameMessage_Discover:
+		m.Node.Mu.Lock()
+		if m.stopped || m.Node.PlayerInfo.GetRole() != pb.NodeRole_MASTER {
+			m.Node.Mu.Unlock()
+			return
+		}
+		m.Node.Mu.Unlock()
 		m.handleDiscoverMessage(addr)
 
 	case *pb.GameMessage_Steer:
+		m.Node.Mu.Lock()
+		if m.stopped || m.Node.PlayerInfo.GetRole() != pb.NodeRole_MASTER {
+			m.Node.Mu.Unlock()
+			return
+		}
+		m.Node.Mu.Unlock()
 		playerId := msg.GetSenderId()
 		if playerId == 0 {
 			playerId = m.Node.GetPlayerIdByAddress(addr)
@@ -378,8 +394,8 @@ func (m *Master) handleMessage(msg *pb.GameMessage, addr *net.UDPAddr) {
 		if currentRole == pb.NodeRole_VIEWER {
 			// Обновляем состояние игры чтобы UI мог его отображать
 			m.Node.State = t.State.GetState()
-			log.Printf("Old MASTER (now VIEWER) ID %d: Updated Node.State with %d snakes, %d foods, %d players",
-				playerId, len(m.Node.State.Snakes), len(m.Node.State.Foods), len(m.Node.State.Players.Players))
+			log.Printf("Old MASTER (now VIEWER) ID %d: Updated state from Master %v. Snakes: %d, Foods: %d",
+				playerId, addr, len(m.Node.State.Snakes), len(m.Node.State.Foods))
 			m.Node.Cond.Broadcast() // Уведомляем UI о новом состоянии
 		}
 		m.Node.Mu.Unlock()
